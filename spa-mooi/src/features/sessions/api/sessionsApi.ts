@@ -2,6 +2,8 @@ import type { DeploymentSnapshot } from '@/features/sessions/types/DeploymentSna
 import type { SessionConfiguration } from '@/features/sessions/types/SessionConfiguration';
 import type { SessionProvider } from '@/features/sessions/types/SessionProvider';
 import { sessionsFetch } from '@/features/sessions/lib/sessionsFetch';
+import { readNdjson } from '@/features/sessions/lib/readNdjson';
+import type { AsideFrame } from '@/features/sessions/types/AsideFrame';
 import type { ChangesSummary } from '@/features/sessions/types/ChangesSummary';
 import type { CreateSessionRequest } from '@/features/sessions/types/CreateSessionRequest';
 import type { FileDiffPayload } from '@/features/sessions/types/FileDiffPayload';
@@ -24,6 +26,7 @@ const interruptPath = (sessionId: string) => `/sessions/${sessionId}/interrupt`;
 const recoverPath = (sessionId: string) => `/sessions/${sessionId}/recover`;
 const compactPath = (sessionId: string) => `/sessions/${sessionId}/compact`;
 const clearPath = (sessionId: string) => `/sessions/${sessionId}/clear`;
+const asidesPath = (sessionId: string) => `/sessions/${sessionId}/asides`;
 const permissionPath = (sessionId: string, requestId: string) =>
   `/sessions/${sessionId}/permissions/${requestId}`;
 const questionPath = (sessionId: string, requestId: string) => `/sessions/${sessionId}/questions/${requestId}`;
@@ -127,6 +130,29 @@ export const recoverSession = async (sessionId: string): Promise<void> => {
 export const compactSession = async (sessionId: string): Promise<void> => {
   const response = await sessionsFetch(compactPath(sessionId), { method: 'POST' });
   if (!response.ok) throw new Error(await apiErrorMessage(response, 'Could not compact the conversation.'));
+};
+
+/** Streams a side question's answer through `onText`; it never enters the conversation. */
+export const askAside = async (
+  sessionId: string,
+  question: string,
+  onText: (text: string) => void,
+  signal: AbortSignal,
+): Promise<void> => {
+  const response = await sessionsFetch(asidesPath(sessionId), {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({ question }),
+    signal,
+  });
+  if (!response.ok || !response.body) throw new Error(await apiErrorMessage(response, 'Could not ask the side question.'));
+
+  for await (const frame of readNdjson<AsideFrame>(response.body)) {
+    if (frame.type === 'delta') onText(frame.text);
+    else if (frame.type === 'error') throw new Error(frame.message);
+    else return;
+  }
+  throw new Error('The side question was interrupted. Try again.');
 };
 
 export const clearSessionConversation = async (sessionId: string): Promise<void> => {

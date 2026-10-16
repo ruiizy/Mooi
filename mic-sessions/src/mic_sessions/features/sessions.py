@@ -552,6 +552,10 @@ class SendMessageRequest(BaseModel):
     images: list[ImageUploadRequest] = Field(default_factory=list, max_length=images.MAX_IMAGES)
 
 
+class AsideRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=10_000)
+
+
 class UpdateSessionConfigurationRequest(BaseModel):
     # `model_fields_set` below distinguishes an omitted field from an explicit
     # null effort, which is how clients select a model with no effort setting.
@@ -677,6 +681,8 @@ class Session:
     closing: bool = False
     turn_id: str | None = None
     pending: PendingInfo | None = None
+    # Side questions being answered right now; they never enter the log.
+    asides: int = 0
     interactions: dict[str, dict[str, Any]] = field(default_factory=dict)
     # --- push-based changes refresh ---
     changes_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -1477,6 +1483,53 @@ async def _deliver(session: Session, runtime: AgentRuntime, text: str,
             _record_status(session, STATUS_FAILED, RECOVERABLE_DETAIL)
             raise ApiException.bad_gateway("The message could not be delivered") from None
     return SendMessageResponse(seq=event.seq, images=[image.payload() for image in attached])
+
+
+_ASIDE_STATUSES = (STATUS_READY, STATUS_WORKING, STATUS_WAITING)
+_ASIDE_FAILED = "The agent could not answer the side question. Try again."
+
+
+@router.post("/sessions/{session_id}/asides")
+async def ask_aside(
+    session_id: UUID, body: AsideRequest, caller: Annotated[Caller, Depends(current_caller)]
+) -> StreamingResponse:
+    """Answers a side question beside the conversation, even mid-turn, as NDJSON chunks.
+
+    The answer is ephemeral: it is streamed to the asker only, never recorded in the event log and
+    never seen by the agent's live conversation."""
+    session = get_registry().get_for(caller, session_id)
+    question = body.question.strip()
+    if not question:
+        raise ApiException.bad_request("The side question cannot be blank")
+    if not describe(session.provider).capabilities.asides:
+        raise ApiException.bad_request("This agent does not answer side questions")
+    if session.closing or session.status not in _ASIDE_STATUSES:
+        raise ApiException.conflict("The session cannot answer side questions right now")
+    if session.asides:
+        raise ApiException.conflict("A side question is already being answered")
+    runtime = _runtime(session)
+    _touch_activity(session)
+
+    def line(payload: dict[str, Any]) -> str:
+        return json.dumps(payload) + "\n"
+
+    async def chunks() -> AsyncIterator[str]:
+        session.asides += 1
+        try:
+            async for text in runtime.aside(question):
+                if text:
+                    yield line({"type": "delta", "text": text})
+            yield line({"type": "done"})
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            LOG.warning("Session %s could not answer a side question", session.id, exc_info=True)
+            yield line({"type": "error", "message": _ASIDE_FAILED})
+        finally:
+            session.asides -= 1
+
+    return StreamingResponse(chunks(), media_type="application/x-ndjson",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @router.post("/sessions/{session_id}/recover", status_code=status.HTTP_204_NO_CONTENT)

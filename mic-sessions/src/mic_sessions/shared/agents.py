@@ -35,7 +35,7 @@ import shutil
 import subprocess
 import tempfile
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
@@ -97,6 +97,18 @@ _KIND_PERMISSION = "permission"
 _KIND_QUESTION = "question"
 _INTERRUPTED_MESSAGE = "The agent connection was interrupted"
 RECOVERABLE_DETAIL = "The agent lost its connection. Reconnect to continue; the workspace and its changes are kept."
+_ASIDE_TIMEOUT_SECONDS = 300
+
+
+def _aside_prompt(question: str) -> str:
+    """Wraps a side question so the model answers it on its own, outside the main task."""
+    return (
+        "The user has a quick side question while the main task continues elsewhere. Answer it "
+        "directly and concisely from this conversation and what you already know. You cannot use "
+        "tools, run commands or change files now; if the answer needs information you do not have, "
+        "say so briefly and suggest how to find it. Do not continue the main task.\n\n"
+        f"<side_question>\n{question}\n</side_question>"
+    )
 
 
 class AgentEvent(TypedDict):
@@ -237,6 +249,7 @@ class AgentCapabilities:
     editable_tool_input: bool = False
     cost: bool = False
     images: bool = False
+    asides: bool = False
 
     def as_payload(self) -> dict[str, bool]:
         return {
@@ -248,6 +261,7 @@ class AgentCapabilities:
             "editableToolInput": self.editable_tool_input,
             "cost": self.cost,
             "images": self.images,
+            "asides": self.asides,
         }
 
 
@@ -309,6 +323,10 @@ class AgentRuntime(Protocol):
 
     async def resolve(self, request_id: str, payload: dict[str, Any]) -> None: ...
 
+    def aside(self, question: str) -> AsyncIterator[str]:
+        """Answer a side question from the conversation so far, in chunks, without touching it: no
+        tools, no changes and nothing recorded. Runs beside a turn; only with the `asides` capability."""
+
 
 CLAUDE_CAPABILITIES = AgentCapabilities(
     streaming=True,
@@ -319,6 +337,7 @@ CLAUDE_CAPABILITIES = AgentCapabilities(
     editable_tool_input=False,
     cost=True,
     images=True,
+    asides=True,
 )
 
 
@@ -362,6 +381,13 @@ class _InMemoryTranscriptStore:
         async with self._lock:
             entries = self._entries.get(self._key(key))
             return [dict(entry) for entry in entries] if entries else None
+
+    async def forget(self, session_id: str) -> None:
+        """Drops a throwaway conversation, such as a side question's fork."""
+        async with self._lock:
+            for key in [key for key in self._entries if key[1] == session_id]:
+                self._entries.pop(key, None)
+                self._entry_ids.pop(key, None)
 
 
 def _tool_title(name: str, input_data: dict[str, Any]) -> str:
@@ -724,6 +750,45 @@ class ClaudeAgentRuntime:
             await self._refresh_quota(refresh=True)
         except Exception:
             LOG.debug("Claude quota is unavailable after compaction", exc_info=True)
+
+    async def aside(self, question: str) -> AsyncIterator[str]:
+        """Answers from an isolated, tool-less fork; the live conversation never sees it."""
+        resume = self._conversation_id
+        options = replace(self._build_options(self._config, resume=resume),
+                          fork_session=resume is not None, tools=[], skills=None, plugins=[], mcp_servers={},
+                          setting_sources=[], permission_mode="dontAsk", can_use_tool=None,
+                          include_partial_messages=True, max_turns=1)
+        client = ClaudeSDKClient(options=options)
+        # Owned like any other client, so closing the session also stops a running side question.
+        self._clients.add(client)
+        fork_id: str | None = None
+        try:
+            async with asyncio.timeout(_ASIDE_TIMEOUT_SECONDS):
+                await client.connect()
+                await client.query(_aside_prompt(question))
+                streamed = False
+                async for message in client.receive_response():
+                    session_id = getattr(message, "session_id", None)
+                    if isinstance(session_id, str) and session_id != resume:
+                        fork_id = session_id
+                    if isinstance(message, StreamEvent) and not getattr(message, "parent_tool_use_id", None):
+                        raw = message.event if isinstance(message.event, dict) else {}
+                        text = (raw.get("delta") or {}).get("text") if raw.get("type") == "content_block_delta" else None
+                        if text:
+                            streamed = True
+                            yield text
+                    elif isinstance(message, AssistantMessage) and not streamed:
+                        text = "".join(block.text for block in message.content if isinstance(block, TextBlock))
+                        if text:
+                            yield text
+                    elif isinstance(message, ResultMessage) and message.is_error:
+                        raise RuntimeError("Claude could not answer the side question")
+        finally:
+            with suppress(Exception):
+                await client.disconnect()
+            self._clients.discard(client)
+            if fork_id is not None:
+                await self._transcript_store.forget(fork_id)
 
     async def close(self) -> None:
         if self._pump is not None:
@@ -1219,7 +1284,8 @@ def _stream_failure_message(error: Exception) -> str:
     return f"{_INTERRUPTED_MESSAGE} ({cause}). Restoring the conversation; the workspace and its changes are kept."
 
 
-CODEX_CAPABILITIES = AgentCapabilities(streaming=True, thinking=True, questions=True, interrupt=True, images=True)
+CODEX_CAPABILITIES = AgentCapabilities(streaming=True, thinking=True, questions=True, interrupt=True, images=True,
+                                       asides=True)
 
 # Full access, like the Claude adapter: Codex never asks for approvals and runs unsandboxed
 # inside the session's own clone. Only the agent's own questions reach the player.
@@ -1456,6 +1522,26 @@ class CodexAgentRuntime:
                     LOG.debug("Codex quota is unavailable after compaction")
             finally:
                 self._client = None
+
+    async def aside(self, question):
+        """Answers in an ephemeral, read-only fork of the thread on its own connection, beside any turn."""
+        from mic_sessions.shared import codex
+        if self._closing or self._account is None:
+            raise ApiException.conflict("Codex session is closed")
+        params = {**self._thread_params(), "approvalPolicy": "never", "sandbox": "read-only", "ephemeral": True}
+        async with asyncio.timeout(_ASIDE_TIMEOUT_SECONDS):
+            # No request handler: anything the fork asks for is declined.
+            async with codex.connected(self._account, self._workspace) as client:
+                thread = (await client.call("thread_fork", self._thread_id, params) if self._thread_id
+                          else await client.call("thread_start", params))
+                turn = await client.call("turn_start", thread.thread.id,
+                                         [{"type": "text", "text": _aside_prompt(question)}],
+                                         {"model": self._config.model, "effort": self._config.effort})
+                async for method, payload in client.notifications(turn.turn.id):
+                    if method == "item/agentMessage/delta" and payload.get("delta"):
+                        yield payload["delta"]
+                    elif method == "turn/completed" and payload["turn"]["status"] != "completed":
+                        raise RuntimeError("Codex could not answer the side question")
 
     async def recover(self):
         """Each turn opens its own connection, so a broken one already ended its turn: only the
