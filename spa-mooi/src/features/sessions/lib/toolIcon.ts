@@ -34,6 +34,13 @@ const icons: Record<string, LucideIcon> = {
   WebFetch: Globe,
   TodoWrite: ListTodo,
   Task: Bot,
+  Agent: Bot,
+  MessageAgent: Bot,
+  ResumeAgent: Bot,
+  WaitAgent: Bot,
+  CloseAgent: Bot,
+  InterruptAgent: Bot,
+  ListAgents: Bot,
   Skill: Sparkles,
   ImageGeneration: ImagePlus,
   ViewImage: Image,
@@ -60,5 +67,11 @@ export const toolCategory = (name: string, status: TranscriptStep['status']) => 
   if (name === 'Skill') return 'Skill';
   if (name === 'ImageGeneration') return status === 'running' ? 'Generating image' : 'Image';
   if (name === 'ViewImage') return 'View image';
+  if (name === 'WaitAgent') return 'Wait for agents';
+  if (name === 'MessageAgent') return 'Message agent';
+  if (name === 'ResumeAgent') return 'Resume agent';
+  if (name === 'CloseAgent') return 'Close agent';
+  if (name === 'InterruptAgent') return 'Interrupt agent';
+  if (name === 'ListAgents') return 'List agents';
   return 'Tool';
 };

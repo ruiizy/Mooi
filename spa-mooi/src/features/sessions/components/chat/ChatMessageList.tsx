@@ -43,7 +43,7 @@ export const ChatMessageList = ({
   const [showLatest, setShowLatest] = useState(false);
   const visibleEntries = entries.filter((entry) => entry.kind !== 'assistant' ||
     (entry.streaming && working) || entry.result || entry.blocks.some((block) =>
-      block.kind === 'step' || ((block.kind !== 'thinking' || capabilities.thinking) && block.text.trim() && !isProviderPlaceholder(block.text))));
+      block.kind === 'step' || block.kind === 'subagent' || ((block.kind !== 'thinking' || capabilities.thinking) && block.text.trim() && !isProviderPlaceholder(block.text))));
   const hasStreamingAssistant = visibleEntries.some((entry) => entry.kind === 'assistant' && entry.streaming);
 
   useEffect(() => {

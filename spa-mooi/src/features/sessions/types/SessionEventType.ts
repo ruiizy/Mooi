@@ -23,6 +23,7 @@ export type SessionEventType =
   | 'permission.resolved'
   | 'question.request'
   | 'question.resolved'
+  | 'subagent.updated'
   | 'turn.result'
   | 'changes.updated'
   | 'error';

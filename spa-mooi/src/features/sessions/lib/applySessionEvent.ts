@@ -1,4 +1,10 @@
-import { isProviderPlaceholder } from './isProviderPlaceholder';
+import { applySubagentUpdate } from './applySubagentUpdate';
+import { isSubagentTool } from './isSubagentTool';
+import { newSubagent } from './newSubagent';
+import { resolveStepIn } from './resolveStepIn';
+import { settleTurnBlocks } from './settleTurnBlocks';
+import { updateSubagentIn } from './updateSubagentIn';
+import { withBlockText } from './withBlockText';
 import { DEPLOYMENT_LOG_LIMIT } from './deploymentLogLimit';
 import type { SessionPendingRequest } from '@/features/sessions/types/SessionPendingRequest';
 import type { AgentQuestion } from '@/features/sessions/types/AgentQuestion';
@@ -9,6 +15,7 @@ import type { SessionTranscriptState } from '@/features/sessions/types/SessionTr
 import type { TranscriptBlock } from '@/features/sessions/types/TranscriptBlock';
 import type { TranscriptEntry } from '@/features/sessions/types/TranscriptEntry';
 import type { TranscriptStep } from '@/features/sessions/types/TranscriptStep';
+import type { TranscriptSubagent } from '@/features/sessions/types/TranscriptSubagent';
 
 /**
  * A fresh transcript always starts at `seq` 0 — even for a session that already has history —
@@ -34,13 +41,9 @@ export const emptyTranscriptState = (): SessionTranscriptState => ({
 });
 
 type AssistantEntry = Extract<TranscriptEntry, { kind: 'assistant' }>;
-type TextLikeBlock = Extract<TranscriptBlock, { kind: 'text' | 'thinking' }>;
 
 const isOpenAssistantEntry = (entry: TranscriptEntry | undefined): entry is AssistantEntry =>
   entry !== undefined && entry.kind === 'assistant' && entry.streaming;
-
-const isTextLikeBlock = (block: TranscriptBlock): block is TextLikeBlock =>
-  block.kind === 'text' || block.kind === 'thinking';
 
 const newTurnEntry = (seq: number, at: string, blocks: TranscriptBlock[]): AssistantEntry => ({
   id: `turn-${seq}`,
@@ -59,102 +62,86 @@ const closeOpenEntry = (entries: TranscriptEntry[], patch: Partial<AssistantEntr
     return entries;
   }
 
-  return [...entries.slice(0, -1), { ...last, streaming: false,
-    blocks: last.blocks.map((block) => block.kind === 'step' && block.step.status === 'running'
-      ? { ...block, step: { ...block.step, status: 'failed', summary: 'Turn ended before a tool result was received.' } }
-      : block), ...patch }];
+  return [...entries.slice(0, -1), { ...last, streaming: false, blocks: settleTurnBlocks(last.blocks), ...patch }];
 };
 
-/**
- * Appends (`assistant.delta` / `thinking.delta`) or replaces (`assistant.message` /
- * `thinking.message`, the SDK's authoritative final text) one text/thinking block on the open turn,
- * starting a new turn entry when none is open.
- */
-const withTextBlock = (
+/** Applies `update` to the open turn's blocks, starting a new turn when none is open and the result is not empty. */
+const withOpenTurn = (
   entries: TranscriptEntry[],
   seq: number,
   at: string,
-  blockKind: 'text' | 'thinking',
-  messageId: string,
-  text: string,
-  mode: 'append' | 'replace',
+  update: (blocks: TranscriptBlock[]) => TranscriptBlock[],
 ): TranscriptEntry[] => {
-  const empty = !text.trim() || (blockKind === 'text' && isProviderPlaceholder(text));
-  // A final empty block replaces any provisional placeholder received in deltas.
-  if (mode === 'replace' && empty) {
-    const last = entries[entries.length - 1];
-    if (!isOpenAssistantEntry(last)) return entries;
-    return [...entries.slice(0, -1), { ...last, blocks: last.blocks.filter((block) =>
-      !(isTextLikeBlock(block) && block.kind === blockKind && block.id === messageId)) }];
-  }
-  if (!text) return entries;
-
-  const buildBlocks = (blocks: TranscriptBlock[]): TranscriptBlock[] => {
-    const index = blocks.findIndex((block) => isTextLikeBlock(block) && block.kind === blockKind && block.id === messageId);
-    const lastBlock = blocks[index];
-
-    if (lastBlock && isTextLikeBlock(lastBlock) && lastBlock.kind === blockKind && lastBlock.id === messageId) {
-      const nextText = mode === 'append' ? lastBlock.text + text : text;
-      return blocks.map((block, i) => i === index ? { ...lastBlock, text: nextText } : block);
-    }
-
-    return [...blocks, { kind: blockKind, id: messageId, text }];
-  };
-
   const last = entries[entries.length - 1];
 
   if (isOpenAssistantEntry(last)) {
-    return [...entries.slice(0, -1), { ...last, blocks: buildBlocks(last.blocks) }];
+    return [...entries.slice(0, -1), { ...last, blocks: update(last.blocks) }];
   }
 
-  return [...entries, newTurnEntry(seq, at, buildBlocks([]))];
+  const blocks = update([]);
+  return blocks.length ? [...entries, newTurnEntry(seq, at, blocks)] : entries;
 };
 
-const withStepBlock = (entries: TranscriptEntry[], seq: number, at: string, step: TranscriptStep): TranscriptEntry[] => {
-  const block: TranscriptBlock = { kind: 'step', step };
-  const last = entries[entries.length - 1];
-
-  if (isOpenAssistantEntry(last)) {
-    return [...entries.slice(0, -1), { ...last, blocks: last.blocks.some((item) => item.kind === 'step' && item.step.toolUseId === step.toolUseId) ? last.blocks : [...last.blocks, block] }];
+/**
+ * Applies `update` to the delegation with `toolUseId` in any turn — a detached agent keeps
+ * reporting after its turn closed. Null when the delegation is unknown (e.g. trimmed history).
+ */
+const withSubagent = (
+  entries: TranscriptEntry[],
+  toolUseId: string,
+  update: (subagent: TranscriptSubagent) => TranscriptSubagent,
+): TranscriptEntry[] | null => {
+  for (let i = entries.length - 1; i >= 0; i -= 1) {
+    const entry = entries[i];
+    if (entry.kind !== 'assistant') continue;
+    const blocks = updateSubagentIn(entry.blocks, toolUseId, update);
+    if (blocks) return entries.map((item, index) => (index === i ? { ...entry, blocks } : item));
   }
-
-  return [...entries, newTurnEntry(seq, at, [block])];
+  return null;
 };
 
-/** Finds the step by `toolUseId` — searching every turn, not just the open one, since a slow tool
- * can still be resolving after its turn has otherwise moved on. */
+/**
+ * Routes a block change into the delegation that produced it (`parentToolUseId`), so a subagent's
+ * work never mixes with the main agent's; without a known parent it lands on the open turn.
+ */
+const withBlocks = (
+  entries: TranscriptEntry[],
+  seq: number,
+  at: string,
+  parent: string | null,
+  update: (blocks: TranscriptBlock[]) => TranscriptBlock[],
+): TranscriptEntry[] => (parent ? withSubagent(entries, parent, (subagent) => ({ ...subagent,
+  status: subagent.status === 'started' ? 'working' : subagent.status, blocks: update(subagent.blocks) })) : null)
+  ?? withOpenTurn(entries, seq, at, update);
+
+/** Text the platform adds to the open turn (requests, answers, provider notices). */
+const withRequestText = (entries: TranscriptEntry[], seq: number, at: string, id: string, text: string, mode: 'append' | 'replace') =>
+  withOpenTurn(entries, seq, at, (blocks) => withBlockText(blocks, 'text', id, text, mode));
+
+/** A tool call: a delegation to another agent, or an ordinary step. Never added twice. */
+const withToolBlock = (blocks: TranscriptBlock[], step: TranscriptStep): TranscriptBlock[] => {
+  const exists = blocks.some((block) => (block.kind === 'step' && block.step.toolUseId === step.toolUseId)
+    || (block.kind === 'subagent' && block.subagent.toolUseId === step.toolUseId));
+  if (exists) return blocks;
+  return [...blocks, isSubagentTool(step.name)
+    ? { kind: 'subagent', subagent: newSubagent(step.toolUseId, step.title, step.input) }
+    : { kind: 'step', step }];
+};
+
+/** Finds the step by `toolUseId` — searching every turn and delegation, not just the open turn,
+ * since a slow tool can still be resolving after its turn has otherwise moved on. */
 const withResolvedStep = (
   entries: TranscriptEntry[],
   toolUseId: string,
-  status: 'done' | 'failed',
+  isError: boolean,
   summary: string,
   images: ImageAttachment[],
 ): TranscriptEntry[] => {
   for (let i = entries.length - 1; i >= 0; i -= 1) {
     const entry = entries[i];
-
-    if (entry.kind !== 'assistant') {
-      continue;
-    }
-
-    const blockIndex = entry.blocks.findIndex((block) => block.kind === 'step' && block.step.toolUseId === toolUseId);
-
-    if (blockIndex === -1) {
-      continue;
-    }
-
-    const block = entry.blocks[blockIndex];
-
-    if (block.kind !== 'step') {
-      continue;
-    }
-
-    const nextBlocks = [...entry.blocks];
-    nextBlocks[blockIndex] = { kind: 'step', step: { ...block.step, status, summary, images } };
-
-    const nextEntries = [...entries];
-    nextEntries[i] = { ...entry, blocks: nextBlocks };
-    return nextEntries;
+    if (entry.kind !== 'assistant') continue;
+    const blocks = resolveStepIn(entry.blocks, toolUseId, { isError, summary, images });
+    if (blocks) return entries.map((item, index) => (index === i ? { ...entry, blocks } : item));
   }
 
   return entries;
@@ -200,6 +187,9 @@ export const applySessionEvent = (state: SessionTranscriptState, event: SessionE
   let changesError = state.changesError;
   let changesEventSeq = state.changesEventSeq;
   let lastMerge = state.lastMerge;
+  // Set on work done inside a delegated agent; deployment events never carry it.
+  const parentToolUseId = (data as Record<string, unknown>).parentToolUseId;
+  const parent = typeof parentToolUseId === 'string' && parentToolUseId ? parentToolUseId : null;
 
   switch (type) {
     case 'message.user': {
@@ -209,23 +199,27 @@ export const applySessionEvent = (state: SessionTranscriptState, event: SessionE
       break;
     }
     case 'assistant.delta': {
-      entries = withTextBlock(entries, seq, at, 'text', String(data.messageId), String(data.text ?? ''), 'append');
+      entries = withBlocks(entries, seq, at, parent, (blocks) =>
+        withBlockText(blocks, 'text', String(data.messageId), String(data.text ?? ''), 'append'));
       break;
     }
     case 'assistant.message': {
-      entries = withTextBlock(entries, seq, at, 'text', String(data.messageId), String(data.text ?? ''), 'replace');
+      entries = withBlocks(entries, seq, at, parent, (blocks) =>
+        withBlockText(blocks, 'text', String(data.messageId), String(data.text ?? ''), 'replace'));
       break;
     }
     case 'thinking.delta': {
-      entries = withTextBlock(entries, seq, at, 'thinking', String(data.messageId), String(data.text ?? ''), 'append');
+      entries = withBlocks(entries, seq, at, parent, (blocks) =>
+        withBlockText(blocks, 'thinking', String(data.messageId), String(data.text ?? ''), 'append'));
       break;
     }
     case 'thinking.message': {
-      entries = withTextBlock(entries, seq, at, 'thinking', String(data.messageId), String(data.text ?? ''), 'replace');
+      entries = withBlocks(entries, seq, at, parent, (blocks) =>
+        withBlockText(blocks, 'thinking', String(data.messageId), String(data.text ?? ''), 'replace'));
       break;
     }
     case 'tool.use': {
-      entries = withStepBlock(entries, seq, at, {
+      entries = withBlocks(entries, seq, at, parent, (blocks) => withToolBlock(blocks, {
         toolUseId: String(data.toolUseId),
         name: String(data.name),
         title: String(data.title ?? data.name),
@@ -233,14 +227,18 @@ export const applySessionEvent = (state: SessionTranscriptState, event: SessionE
         status: 'running',
         summary: null,
         images: [],
-      });
+      }));
+      break;
+    }
+    case 'subagent.updated': {
+      entries = withSubagent(entries, String(data.toolUseId), (subagent) => applySubagentUpdate(subagent, data)) ?? entries;
       break;
     }
     case 'tool.result': {
       entries = withResolvedStep(
         entries,
         String(data.toolUseId),
-        data.isError ? 'failed' : 'done',
+        Boolean(data.isError),
         String(data.summary ?? ''),
         Array.isArray(data.images) ? data.images as ImageAttachment[] : [],
       );
@@ -249,7 +247,7 @@ export const applySessionEvent = (state: SessionTranscriptState, event: SessionE
       break;
     }
     case 'permission.request': {
-      entries = withTextBlock(entries, seq, at, 'text', `request-${data.requestId}`,
+      entries = withRequestText(entries, seq, at, `request-${data.requestId}`,
         `Approval requested: ${String(data.title ?? data.toolName)}`, 'replace');
       pending = [...pending.filter((request) => request.requestId !== String(data.requestId)), {
         kind: 'permission',
@@ -261,7 +259,7 @@ export const applySessionEvent = (state: SessionTranscriptState, event: SessionE
       break;
     }
     case 'question.request': {
-      entries = withTextBlock(entries, seq, at, 'text', `request-${data.requestId}`,
+      entries = withRequestText(entries, seq, at, `request-${data.requestId}`,
         ((data.questions as AgentQuestion[]) ?? []).map((question) => question.question).join('\n'), 'replace');
       pending = [...pending.filter((request) => request.requestId !== String(data.requestId)), {
         kind: 'question',
@@ -272,7 +270,7 @@ export const applySessionEvent = (state: SessionTranscriptState, event: SessionE
     }
     case 'permission.resolved':
     case 'question.resolved': {
-      entries = withTextBlock(entries, seq, at, 'text', `answer-${data.requestId}`,
+      entries = withRequestText(entries, seq, at, `answer-${data.requestId}`,
         data.answers ? Object.entries(data.answers as Record<string, string | string[]>).map(([question, answer]) => `**${question}**\n\n${Array.isArray(answer) ? answer.join(', ') : answer}`).join('\n\n') : `Decision: ${String(data.decision ?? 'resolved')}`, 'replace');
       pending = pending.filter((request) => request.requestId !== String(data.requestId));
       break;
@@ -344,7 +342,7 @@ export const applySessionEvent = (state: SessionTranscriptState, event: SessionE
     }
     case 'agent.activity': {
       if (data.kind === 'conversation_reset') {
-        entries = withTextBlock(entries, seq, at, 'text', `activity-${seq}`,
+        entries = withRequestText(entries, seq, at, `activity-${seq}`,
           String(data.description ?? data.summary ?? ''), 'replace');
       }
       break;

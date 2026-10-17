@@ -2,6 +2,7 @@ import { memo } from 'react';
 import { CircleAlert } from 'lucide-react';
 import { MessageImageGrid } from './MessageImageGrid';
 import { NoticeItem } from './NoticeItem';
+import { transcriptBlockKey } from '@/features/sessions/lib/transcriptBlockKey';
 import { TranscriptContent } from './TranscriptContent';
 import { ThinkingIndicator } from '@/features/sessions/components/chat/ThinkingIndicator';
 import { TurnFooter } from '@/features/sessions/components/chat/TurnFooter';
@@ -65,7 +66,7 @@ export const ChatMessageItem = memo(function ChatMessageItem({ sessionId, entry,
 
         <div className="mt-1.5 flex flex-col gap-2">
           {entry.blocks.map((block) => block.kind === 'thinking' && !capabilities.thinking ? null : (
-            <TranscriptContent key={block.kind === 'step' ? `step-${block.step.toolUseId}` : `${block.kind}-${block.id}`} sessionId={sessionId} block={block} />
+            <TranscriptContent key={transcriptBlockKey(block)} sessionId={sessionId} block={block} />
           ))}
         </div>
 
