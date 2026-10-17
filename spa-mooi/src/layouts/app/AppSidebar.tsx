@@ -1,30 +1,34 @@
+import { useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { X } from 'lucide-react';
 import { ROUTES } from '@/app/routes';
-import { projectPath } from '@/app/paths';
 import { AppNavItem } from '@/layouts/app/AppNavItem';
+import { AppRecentProject } from '@/layouts/app/AppRecentProject';
 import { AppSidebarUser } from '@/layouts/app/AppSidebarUser';
 import { appNavLinks } from '@/layouts/app/appNavLinks';
+import { recentProjects } from '@/layouts/app/recentProjects';
 import { Eyebrow } from '@/shared/components/Eyebrow';
 import { IconButton } from '@/shared/components/IconButton';
-import { Initials } from '@/shared/components/Initials';
 import { Logo } from '@/shared/components/Logo';
 import { cn } from '@/shared/utils/cn';
 import { useAuthStore } from '@/stores/authStore';
 import { useProjectsStore } from '@/stores/projectsStore';
+import { useSessionsStore } from '@/stores/sessionsStore';
 
 interface AppSidebarProps {
   className?: string;
   onNavigate?: () => void;
 }
 
+/** Quiet projects shown at most; projects with open conversations are always listed on top. */
 const SIDEBAR_PROJECTS = 6;
 
 export const AppSidebar = ({ className, onNavigate }: AppSidebarProps) => {
   const player = useAuthStore((state) => state.player);
   const projects = useProjectsStore((state) => state.projects);
+  const sessions = useSessionsStore((state) => state.sessions);
   const links = appNavLinks.filter((link) => !link.adminOnly || player?.role === 'admin');
-  const sidebarProjects = projects.slice(0, SIDEBAR_PROJECTS);
+  const sidebarProjects = useMemo(() => recentProjects(projects, sessions, SIDEBAR_PROJECTS), [projects, sessions]);
 
   return (
     <aside className={cn('flex flex-col bg-canvas', className)}>
@@ -51,16 +55,8 @@ export const AppSidebar = ({ className, onNavigate }: AppSidebarProps) => {
         <div className="min-h-0 flex-1 overflow-y-auto px-3 pt-8 pb-3">
           <Eyebrow className="px-3">Recent</Eyebrow>
           <div className="mt-2 flex flex-col gap-0.5">
-            {sidebarProjects.map((project) => (
-              <Link
-                key={project.id}
-                to={projectPath(project.id)}
-                onClick={onNavigate}
-                className="flex min-h-11 items-center gap-2.5 rounded-[10px] px-3 text-[13px] font-bold text-ink-muted transition hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand"
-              >
-                <Initials value={project.name} size="sm" />
-                <span className="truncate">{project.name}</span>
-              </Link>
+            {sidebarProjects.map((entry) => (
+              <AppRecentProject key={entry.project.id} entry={entry} onNavigate={onNavigate} />
             ))}
           </div>
         </div>

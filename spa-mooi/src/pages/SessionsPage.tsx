@@ -7,7 +7,6 @@ import { SessionGroupSection } from '@/features/sessions/components/overview/Ses
 import { SessionsOverviewHeader } from '@/features/sessions/components/overview/SessionsOverviewHeader';
 import { SessionsOverviewStats } from '@/features/sessions/components/overview/SessionsOverviewStats';
 import { StartSessionDialog } from '@/features/sessions/components/overview/StartSessionDialog';
-import { useSessionsSync } from '@/features/sessions/hooks/useSessionsSync';
 import { groupSessionsByProject } from '@/features/sessions/lib/groupSessionsByProject';
 import { matchesSessionQuery } from '@/features/sessions/lib/matchesSessionQuery';
 import { SESSION_FILTERS, sessionFilter } from '@/features/sessions/lib/sessionFilters';
@@ -17,6 +16,7 @@ import { EmptyState } from '@/shared/components/EmptyState';
 import { Tabs } from '@/shared/components/Tabs';
 import type { BackLink } from '@/shared/types/BackLink';
 import { useSessionsStore } from '@/stores/sessionsStore';
+import { useSessionsSyncStore } from '@/stores/sessionsSyncStore';
 
 const FILTER_PARAM = 'filter';
 
@@ -31,14 +31,16 @@ const Skeleton = () => (
 
 /**
  * Every live session of the player in one place, grouped by project, so checking on agents does
- * not mean opening each project. The list stays live through `useSessionsSync`; the active filter
+ * not mean opening each project. The list stays live through the shell's `useAllSessionsSync`; the active filter
  * lives in `?filter=` so a reload lands back on the same view.
  */
 export const SessionsPage = () => {
   const { projects } = useProjects();
   const allSessions = useSessionsStore((state) => state.sessions);
   const sessions = useMemo(() => allSessions.filter((session) => session.kind === 'session'), [allSessions]);
-  const { loading, error, reload } = useSessionsSync(undefined);
+  const loading = useSessionsSyncStore((state) => state.loading);
+  const error = useSessionsSyncStore((state) => state.error);
+  const reload = useSessionsSyncStore((state) => state.reload);
   const [searchParams, setSearchParams] = useSearchParams();
   const [query, setQuery] = useState('');
   const [newSessionOpen, setNewSessionOpen] = useState(false);

@@ -35,10 +35,11 @@ export const useSessionsSync = (projectId: string | undefined, enabled = true): 
     const load = async () => {
       if (inFlight) return;
       inFlight = true;
+      const knownIds = new Set(useSessionsStore.getState().sessions.map((session) => session.id));
       try {
         const sessions = await fetchSessions(projectId);
         if (cancelled) return;
-        useSessionsStore.getState().syncSessions(sessions, projectId);
+        useSessionsStore.getState().syncSessions(sessions, projectId, knownIds);
         setError(null);
       } catch (failure) {
         if (!cancelled) setError(failure instanceof Error ? failure.message : 'Could not load the sessions.');

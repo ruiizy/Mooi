@@ -2,8 +2,8 @@ import { ChatUsageIndicators } from './ChatUsageIndicators';
 import type { SessionUsage } from '@/features/sessions/types/SessionUsage';
 import type { SessionConfiguration } from '@/features/sessions/types/SessionConfiguration';
 import type { SessionProvider } from '@/features/sessions/types/SessionProvider';
-import { useEffect, useLayoutEffect, useRef, useState, type DragEvent, type ReactNode } from 'react';
-import { ArrowUp, ImagePlus, RotateCw, Square } from 'lucide-react';
+import { useEffect, useId, useLayoutEffect, useRef, useState, type DragEvent, type ReactNode } from 'react';
+import { ArrowUp, ImagePlus, MessageCircleQuestion, RotateCw, Square } from 'lucide-react';
 import type { SessionStatus } from '@/features/sessions/types/SessionStatus';
 import { useDictation } from '@/features/dictation/hooks/useDictation';
 import { DictationButton } from '@/features/dictation/components/DictationButton';
@@ -14,6 +14,13 @@ import { AttachImageButton } from './AttachImageButton';
 import { ComposerImageStrip } from './ComposerImageStrip';
 import { ComposerModelMenu } from './ComposerModelMenu';
 import { ComposerSelect } from './ComposerSelect';
+import { SlashCommandMenu } from './SlashCommandMenu';
+import { matchSlashCommands } from '@/features/sessions/lib/matchSlashCommands';
+import { parseSlashCommand } from '@/features/sessions/lib/parseSlashCommand';
+import { slashCommandOptionId } from '@/features/sessions/lib/slashCommandOptionId';
+import { slashCommands } from '@/features/sessions/lib/slashCommands';
+import type { ParsedSlashCommand } from '@/features/sessions/types/ParsedSlashCommand';
+import type { SlashCommand } from '@/features/sessions/types/SlashCommand';
 import { Button } from '@/shared/components/Button';
 import { cn } from '@/shared/utils/cn';
 
@@ -38,6 +45,11 @@ interface ChatComposerProps {
   onRecover: () => Promise<boolean>;
   onCompact: () => Promise<boolean>;
   onClear: () => Promise<boolean>;
+  /** The agent answers `/btw` side questions, even while a turn runs. */
+  canAskAside?: boolean;
+  /** A side question is still being answered. */
+  askingAside?: boolean;
+  onAside: (question: string) => void;
   onConfigurationChange: (configuration: SessionConfiguration) => void;
   /** Extra toolbar actions next to the context indicator, e.g. applying a recipe. */
   actions?: ReactNode;
@@ -71,12 +83,19 @@ export const ChatComposer = ({
   onRecover,
   onCompact,
   onClear,
+  canAskAside = false,
+  askingAside = false,
+  onAside,
   onConfigurationChange,
   actions,
 }: ChatComposerProps) => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const dictation = useDictation(textareaRef);
+  const menuId = useId();
   const [value, setValue] = useState('');
+  const [menuIndex, setMenuIndex] = useState(0);
+  // The draft the command menu was dismissed on; typing anything else reopens it.
+  const [menuDismissedOn, setMenuDismissedOn] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const draft = useImageDraft();
 
@@ -104,6 +123,13 @@ export const ChatComposer = ({
   const readyImages = draft.images.filter((image) => image.status === 'ready');
   const hasImages = draft.images.length > 0;
   const sendable = (value.trim().length > 0 || readyImages.length > 0) && !draft.preparing && !(hasImages && imagesReason);
+  const commands = slashCommands.filter((command) => command.name !== 'btw' || canAskAside);
+  const suggestions = blocked ? [] : matchSlashCommands(value, commands);
+  const menuOpen = suggestions.length > 0 && menuDismissedOn !== value;
+  const activeIndex = Math.min(menuIndex, suggestions.length - 1);
+  const command = parseSlashCommand(value);
+  const aside = command?.name === 'btw' && canAskAside ? command : null;
+  const asideReady = Boolean(aside?.argument) && !askingAside && !blocked;
   const imageStatus = draft.notice ?? (hasImages && imagesReason ? `${imagesReason}. Pick another model or remove them.` : null);
 
   const attach = (files: File[]) => {
@@ -133,7 +159,42 @@ export const ChatComposer = ({
     resize();
   }, [status, value]);
 
+  const resetHeight = () => {
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto';
+    }
+  };
+
+  const runCommand = async ({ name, argument }: ParsedSlashCommand) => {
+    if (name === 'btw') {
+      if (!asideReady) return;
+      dictation.finish();
+      setValue('');
+      resetHeight();
+      onAside(argument);
+      return;
+    }
+    if (blocked || activeTurn || busy || status !== 'ready' || !hasConversation) return;
+    dictation.finish();
+    if (await (name === 'compact' ? onCompact() : onClear())) setValue('');
+  };
+
+  const pick = (picked: SlashCommand) => {
+    setMenuIndex(0);
+    if (picked.takesArgument) {
+      setValue(`/${picked.name} `);
+      textareaRef.current?.focus();
+    } else {
+      void runCommand({ name: picked.name, argument: '' });
+    }
+  };
+
   const submit = async () => {
+    if (command && (command.name !== 'btw' || aside)) {
+      await runCommand(command);
+      return;
+    }
+
     const text = value.trim();
 
     if (!sendable || blocked || activeTurn || busy || status !== 'ready') {
@@ -145,10 +206,7 @@ export const ChatComposer = ({
     if (!await onSend(text, sent.flatMap((image) => image.prepared ? [image.prepared] : []))) return;
     setValue((current) => current.trim() === text ? '' : current);
     draft.discard(sent.map((image) => image.key));
-
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
-    }
+    resetHeight();
   };
 
   return (
@@ -174,6 +232,9 @@ export const ChatComposer = ({
             Drop images to attach
           </div>
         ) : null}
+        {menuOpen ? (
+          <SlashCommandMenu id={menuId} commands={suggestions} activeIndex={activeIndex} onPick={pick} onHover={setMenuIndex} />
+        ) : null}
         {hasImages ? <ComposerImageStrip images={draft.images} onRemove={draft.remove} /> : null}
         <textarea
           ref={textareaRef}
@@ -182,6 +243,7 @@ export const ChatComposer = ({
           disabled={blocked}
           onChange={(event) => {
             setValue(event.target.value);
+            setMenuIndex(0);
           }}
           onPaste={(event) => {
             const files = acceptsImages ? imageFilesFrom(event.clipboardData) : [];
@@ -191,6 +253,25 @@ export const ChatComposer = ({
             attach(files);
           }}
           onKeyDown={(event) => {
+            if (menuOpen && !event.nativeEvent.isComposing) {
+              const step = event.key === 'ArrowDown' ? 1 : event.key === 'ArrowUp' ? -1 : 0;
+              if (step) {
+                event.preventDefault();
+                setMenuIndex((activeIndex + step + suggestions.length) % suggestions.length);
+                return;
+              }
+              if ((event.key === 'Enter' && !event.shiftKey) || event.key === 'Tab') {
+                event.preventDefault();
+                pick(suggestions[activeIndex]);
+                return;
+              }
+              if (event.key === 'Escape') {
+                event.preventDefault();
+                event.stopPropagation();
+                setMenuDismissedOn(value);
+                return;
+              }
+            }
             if (
               event.key === 'Enter'
               && !event.nativeEvent.isComposing
@@ -204,8 +285,11 @@ export const ChatComposer = ({
               submit();
             }
           }}
-          placeholder={hint ? undefined : 'Describe the next change…'}
+          placeholder={hint ? undefined : 'Describe the next change, or type / for commands'}
           aria-label="Message the agent"
+          aria-autocomplete="list"
+          aria-controls={menuOpen ? menuId : undefined}
+          aria-activedescendant={menuOpen ? slashCommandOptionId(menuId, activeIndex) : undefined}
           enterKeyHint="send"
           data-compose
           className="max-h-[min(12rem,25dvh)] w-full resize-none bg-transparent px-4 pt-3 text-base leading-relaxed keyboard:max-h-32 sm:px-5 sm:pt-4 text-ink placeholder:text-ink-subtle focus:outline-none disabled:cursor-not-allowed"
@@ -213,7 +297,16 @@ export const ChatComposer = ({
         {hint ? <p role="status" className="px-4 pb-2 text-xs text-ink-muted sm:px-5">{hint}</p> : null}
         {imageStatus ? <p role="status" className="px-4 pb-2 text-xs text-warning sm:px-5">{imageStatus}</p> : null}
 
-        {activeTurn ? <p className="px-4 pb-2 text-xs text-ink-muted sm:px-5">Model and effort changes apply to your next message.</p> : null}
+        {aside && !blocked ? (
+          <p role="status" className="flex items-center gap-1.5 px-4 pb-2 text-xs font-medium text-brand-strong sm:px-5">
+            <MessageCircleQuestion className="size-3.5 shrink-0" aria-hidden="true" />
+            {askingAside ? 'Wait for the current side question to be answered.' : 'Side question: answered apart, without interrupting the agent or entering the chat.'}
+          </p>
+        ) : activeTurn ? (
+          <p className="px-4 pb-2 text-xs text-ink-muted sm:px-5">
+            Model and effort changes apply to your next message.{canAskAside ? <> Type <kbd className="font-mono font-semibold text-ink">/btw</kbd> to ask a side question meanwhile.</> : null}
+          </p>
+        ) : null}
 
         {/* One row at every width: phones fold the pickers into a chip, wider screens scroll them sideways. */}
         <div className="relative flex items-center gap-1 px-1.5 pb-1.5 sm:gap-2 sm:px-2 sm:pb-2">
@@ -260,6 +353,13 @@ export const ChatComposer = ({
 
             {!blocked ? <DictationButton field={textareaRef} dictation={dictation} className="max-sm:size-10" /> : null}
 
+            {activeTurn && aside ? (
+              <Button variant="brand" onClick={() => void submit()} disabled={!asideReady} ariaLabel="Ask side question"
+                className="size-10 shrink-0 p-0 sm:size-11">
+                <MessageCircleQuestion className="size-4" />
+              </Button>
+            ) : null}
+
             {activeTurn ? (
               <Button
                 variant="danger"
@@ -280,11 +380,11 @@ export const ChatComposer = ({
               <Button
                 variant="brand"
                 onClick={submit}
-                disabled={busy || !sendable}
-                ariaLabel="Send message"
+                disabled={aside ? !asideReady : busy || !sendable}
+                ariaLabel={aside ? 'Ask side question' : 'Send message'}
                 className="size-10 shrink-0 p-0 sm:size-11"
               >
-                <ArrowUp className="size-4" />
+                {aside ? <MessageCircleQuestion className="size-4" /> : <ArrowUp className="size-4" />}
               </Button>
             ) : null}
           </div>

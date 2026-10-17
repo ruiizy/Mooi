@@ -4,6 +4,8 @@ import type { SessionProvider } from '@/features/sessions/types/SessionProvider'
 import { CircleAlert, LoaderCircle } from 'lucide-react';
 import { ChatComposer } from '@/features/sessions/components/chat/ChatComposer';
 import { ChatMessageList } from '@/features/sessions/components/chat/ChatMessageList';
+import { AsideStack } from '@/features/sessions/components/chat/AsideStack';
+import { useAsides } from '@/features/sessions/hooks/useAsides';
 import { RecipesButton } from '@/features/recipes/components/RecipesButton';
 import type { SessionStreamState } from '@/features/sessions/lib/openSessionStream';
 import type { PreparedImage } from '@/features/sessions/types/PreparedImage';
@@ -58,6 +60,7 @@ export const ChatPanel = ({
   onAnswerQuestion,
 }: ChatPanelProps) => {
   const [sending, setSending] = useState(false);
+  const asides = useAsides(session.id);
   const working = session.status === 'working' || session.status === 'waiting';
   const deploying = session.deployment.state === 'starting';
   const canSend = session.status === 'ready' && !busy && !sending && !deploying;
@@ -106,6 +109,8 @@ export const ChatPanel = ({
       </p>
     ) : null}
 
+    <AsideStack asides={asides.asides} onDismiss={asides.dismiss} />
+
     <ChatComposer
       key={`composer-${session.id}`}
       usage={session.usage}
@@ -126,6 +131,9 @@ export const ChatPanel = ({
       onRecover={onRecover}
       onCompact={onCompact}
       onClear={onClear}
+      canAskAside={Boolean(session.capabilities.asides)}
+      askingAside={asides.answering}
+      onAside={(question) => void asides.ask(question)}
       onConfigurationChange={onConfigurationChange}
       actions={session.kind === 'session' ? <RecipesButton disabled={!canSend} onApply={(text) => send(text)} /> : null}
     />

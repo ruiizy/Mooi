@@ -35,7 +35,7 @@ import shutil
 import subprocess
 import tempfile
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
@@ -97,6 +97,22 @@ _KIND_PERMISSION = "permission"
 _KIND_QUESTION = "question"
 _INTERRUPTED_MESSAGE = "The agent connection was interrupted"
 RECOVERABLE_DETAIL = "The agent lost its connection. Reconnect to continue; the workspace and its changes are kept."
+_ASIDE_TIMEOUT_SECONDS = 300
+_TASK_SUBTYPES = frozenset({"task_started", "task_progress", "task_notification", "task_updated"})
+# Both Claude task vocabularies: `task_notification` says `stopped` where `task_updated` says `killed`.
+_TASK_STATUSES = {"pending": "started", "running": "working", "completed": "completed",
+                  "failed": "failed", "stopped": "interrupted", "killed": "interrupted"}
+
+
+def _aside_prompt(question: str) -> str:
+    """Wraps a side question so the model answers it on its own, outside the main task."""
+    return (
+        "The user has a quick side question while the main task continues elsewhere. Answer it "
+        "directly and concisely from this conversation and what you already know. You cannot use "
+        "tools, run commands or change files now; if the answer needs information you do not have, "
+        "say so briefly and suggest how to find it. Do not continue the main task.\n\n"
+        f"<side_question>\n{question}\n</side_question>"
+    )
 
 
 class AgentEvent(TypedDict):
@@ -143,6 +159,21 @@ def tool_result(tool_use_id: str, is_error: bool, summary: str, images: Sequence
     if images:
         data["images"] = [image.payload() for image in images]
     return {"type": "tool.result", "data": data}
+
+
+def subagent_updated(tool_use_id: str, **fields: Any) -> AgentEvent:
+    """The lifecycle of one delegated agent, keyed by the tool call that delegated it. Only fields
+    the provider exposed are sent; clients merge them into what they already know."""
+    return {"type": "subagent.updated",
+            "data": {"toolUseId": tool_use_id, **{key: value for key, value in fields.items() if value is not None}}}
+
+
+def _with_parent(event: AgentEvent, parent: str | None) -> AgentEvent:
+    """Marks an event produced inside a delegated agent, so clients nest it under its delegation
+    instead of mixing it with the main agent's turn."""
+    if not parent or parent == "root":
+        return event
+    return {"type": event["type"], "data": {**event["data"], "parentToolUseId": parent}}
 
 
 def permission_request(request_id: str, tool_name: str, title: str, input_data: dict[str, Any]) -> AgentEvent:
@@ -237,6 +268,7 @@ class AgentCapabilities:
     editable_tool_input: bool = False
     cost: bool = False
     images: bool = False
+    asides: bool = False
 
     def as_payload(self) -> dict[str, bool]:
         return {
@@ -248,6 +280,7 @@ class AgentCapabilities:
             "editableToolInput": self.editable_tool_input,
             "cost": self.cost,
             "images": self.images,
+            "asides": self.asides,
         }
 
 
@@ -309,6 +342,10 @@ class AgentRuntime(Protocol):
 
     async def resolve(self, request_id: str, payload: dict[str, Any]) -> None: ...
 
+    def aside(self, question: str) -> AsyncIterator[str]:
+        """Answer a side question from the conversation so far, in chunks, without touching it: no
+        tools, no changes and nothing recorded. Runs beside a turn; only with the `asides` capability."""
+
 
 CLAUDE_CAPABILITIES = AgentCapabilities(
     streaming=True,
@@ -319,6 +356,7 @@ CLAUDE_CAPABILITIES = AgentCapabilities(
     editable_tool_input=False,
     cost=True,
     images=True,
+    asides=True,
 )
 
 
@@ -362,6 +400,13 @@ class _InMemoryTranscriptStore:
         async with self._lock:
             entries = self._entries.get(self._key(key))
             return [dict(entry) for entry in entries] if entries else None
+
+    async def forget(self, session_id: str) -> None:
+        """Drops a throwaway conversation, such as a side question's fork."""
+        async with self._lock:
+            for key in [key for key in self._entries if key[1] == session_id]:
+                self._entries.pop(key, None)
+                self._entry_ids.pop(key, None)
 
 
 def _tool_title(name: str, input_data: dict[str, Any]) -> str:
@@ -576,6 +621,8 @@ class ClaudeAgentRuntime:
         self._stream_message_id: str | None = None
         self._stream_ids: dict[str, str] = {}
         self._assistant_block_offsets: dict[tuple[str, str], int] = {}
+        # Claude task id -> the tool call that delegated it; later task updates omit the call.
+        self._task_tools: dict[str, str] = {}
         self._context_input: int | None = None
         self._context_output = 0
         self._context_model: str | None = None
@@ -724,6 +771,45 @@ class ClaudeAgentRuntime:
             await self._refresh_quota(refresh=True)
         except Exception:
             LOG.debug("Claude quota is unavailable after compaction", exc_info=True)
+
+    async def aside(self, question: str) -> AsyncIterator[str]:
+        """Answers from an isolated, tool-less fork; the live conversation never sees it."""
+        resume = self._conversation_id
+        options = replace(self._build_options(self._config, resume=resume),
+                          fork_session=resume is not None, tools=[], skills=None, plugins=[], mcp_servers={},
+                          setting_sources=[], permission_mode="dontAsk", can_use_tool=None,
+                          include_partial_messages=True, max_turns=1)
+        client = ClaudeSDKClient(options=options)
+        # Owned like any other client, so closing the session also stops a running side question.
+        self._clients.add(client)
+        fork_id: str | None = None
+        try:
+            async with asyncio.timeout(_ASIDE_TIMEOUT_SECONDS):
+                await client.connect()
+                await client.query(_aside_prompt(question))
+                streamed = False
+                async for message in client.receive_response():
+                    session_id = getattr(message, "session_id", None)
+                    if isinstance(session_id, str) and session_id != resume:
+                        fork_id = session_id
+                    if isinstance(message, StreamEvent) and not getattr(message, "parent_tool_use_id", None):
+                        raw = message.event if isinstance(message.event, dict) else {}
+                        text = (raw.get("delta") or {}).get("text") if raw.get("type") == "content_block_delta" else None
+                        if text:
+                            streamed = True
+                            yield text
+                    elif isinstance(message, AssistantMessage) and not streamed:
+                        text = "".join(block.text for block in message.content if isinstance(block, TextBlock))
+                        if text:
+                            yield text
+                    elif isinstance(message, ResultMessage) and message.is_error:
+                        raise RuntimeError("Claude could not answer the side question")
+        finally:
+            with suppress(Exception):
+                await client.disconnect()
+            self._clients.discard(client)
+            if fork_id is not None:
+                await self._transcript_store.forget(fork_id)
 
     async def close(self) -> None:
         if self._pump is not None:
@@ -940,7 +1026,11 @@ class ClaudeAgentRuntime:
         event = question_request(request_id, questions)
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending[request_id] = _PendingRequest(_KIND_QUESTION, future)
+        # A delegated agent asking the player waits on them, and says so on its delegation.
+        delegation = self._task_tools.get(getattr(context, "agent_id", None) or "")
         try:
+            if delegation:
+                await self._publish(subagent_updated(delegation, status="waiting"))
             await self._publish(event)
             await self._ask(request)
             payload = await future
@@ -951,6 +1041,8 @@ class ClaudeAgentRuntime:
             return PermissionResultDeny(message=_DENIED_MESSAGE)
         finally:
             self._pending.pop(request_id, None)
+            if delegation:
+                await self._publish(subagent_updated(delegation, status="working"))
         return self._decide(payload, input_data, True)
 
     def _decide(self, payload: dict[str, Any], input_data: dict[str, Any], is_question: bool) -> PermissionResult:
@@ -1048,6 +1140,8 @@ class ClaudeAgentRuntime:
                     })
             await self._refresh_quota()
 
+        elif isinstance(message, SystemMessage) and message.subtype in _TASK_SUBTYPES:
+            await self._on_task_message(message.subtype, message.data)
         elif isinstance(message, SystemMessage):
             # Whitelist useful user-facing metadata; never publish the raw initialization payload.
             data = {key: message.data[key] for key in
@@ -1058,12 +1152,38 @@ class ClaudeAgentRuntime:
             self._context_output = 0
             await self._emit("session.usage", {"context": None})
             self._conversation_id = None
+            self._task_tools.clear()
             self._stream_ids.clear()
             self._assistant_block_offsets.clear()
             self._stream_message_id = None
             await self._emit("agent.activity", {
                 "kind": "conversation_reset", "description": "The provider cleared its conversation context.",
             })
+
+    async def _on_task_message(self, subtype: str, data: Mapping[str, Any]) -> None:
+        """Claude reports each delegated agent as a task tied to the `Agent` tool call that started
+        it. Tasks of other tools (a background command) share the shape; clients ignore those."""
+        task_id = str(data.get("task_id") or "")
+        tool_use_id = data.get("tool_use_id") or self._task_tools.get(task_id)
+        if not isinstance(tool_use_id, str) or not tool_use_id:
+            return
+        if task_id:
+            self._task_tools[task_id] = tool_use_id
+        patch = data.get("patch") if isinstance(data.get("patch"), dict) else {}
+        status = {"task_started": "started", "task_progress": "working"}.get(subtype) or _TASK_STATUSES.get(
+            str(patch.get("status") or data.get("status") or ""))
+        if status is None:
+            return
+        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+        summary = data.get("summary") if subtype == "task_notification" else patch.get("error")
+        await self._publish(subagent_updated(
+            tool_use_id, taskId=task_id or None, status=status,
+            description=data.get("description") or None,
+            lastToolName=data.get("last_tool_name") or None,
+            summary=summary if isinstance(summary, str) and summary else None,
+            usage={"totalTokens": usage.get("total_tokens"), "toolUses": usage.get("tool_uses"),
+                   "durationMs": usage.get("duration_ms")} if usage else None,
+        ))
 
     async def _on_stream_event(self, message: Any) -> None:
         """Partial-message deltas. The SDK carries the raw Anthropic event in `event`; older
@@ -1099,9 +1219,9 @@ class ClaudeAgentRuntime:
         self._stream_ids[parent] = stream_id
         message_id = f"{stream_id}:{raw.get('index', 0)}"
         if delta.get("text"):
-            await self._publish(assistant_delta(message_id, delta["text"]))
+            await self._publish(_with_parent(assistant_delta(message_id, delta["text"]), parent))
         elif delta.get("thinking"):
-            await self._publish(thinking_delta(message_id, delta["thinking"]))
+            await self._publish(_with_parent(thinking_delta(message_id, delta["thinking"]), parent))
 
     def _current_stream_message_id(self) -> str:
         if self._stream_message_id is None:
@@ -1142,16 +1262,18 @@ class ClaudeAgentRuntime:
                 # Claude emits this sentinel when filtering a contentless assistant message.
                 # Publish an empty authoritative block so clients also clear provisional deltas.
                 text = "" if block.text.strip() in {"[No message content]", "<no message>"} else block.text
-                await self._publish(assistant_message(block_id, text))
+                await self._publish(_with_parent(assistant_message(block_id, text), parent))
             elif isinstance(block, ThinkingBlock):
-                await self._publish(thinking_message(block_id, block.thinking))
+                await self._publish(_with_parent(thinking_message(block_id, block.thinking), parent))
             elif isinstance(block, ToolUseBlock):
-                await self._publish(tool_use(block.id, block.name, _tool_title(block.name, block.input), block.input))
+                await self._publish(_with_parent(
+                    tool_use(block.id, block.name, _tool_title(block.name, block.input), block.input), parent))
             elif isinstance(block, ServerToolUseBlock):
                 name = {"web_search": "WebSearch", "web_fetch": "WebFetch"}.get(block.name, block.name)
-                await self._publish(tool_use(block.id, name, _tool_title(name, block.input), block.input))
+                await self._publish(_with_parent(tool_use(block.id, name, _tool_title(name, block.input), block.input), parent))
             elif isinstance(block, ServerToolResultBlock):
-                await self._publish(tool_result(block.tool_use_id, False, _result_summary(block.content)))
+                await self._publish(_with_parent(
+                    tool_result(block.tool_use_id, False, _result_summary(block.content)), parent))
         self._assistant_block_offsets[block_key] = first_index + len(message.content)
         self._stream_message_id = None
         if message.error:
@@ -1161,12 +1283,12 @@ class ClaudeAgentRuntime:
         content = message.content
         if not isinstance(content, list):
             return
+        parent = getattr(message, "parent_tool_use_id", None)
         for block in content:
             if isinstance(block, ToolResultBlock):
                 images = await self._result_images(block.content)
-                await self._publish(
-                    tool_result(block.tool_use_id, bool(block.is_error), _result_summary(block.content), images)
-                )
+                await self._publish(_with_parent(
+                    tool_result(block.tool_use_id, bool(block.is_error), _result_summary(block.content), images), parent))
 
     async def _result_images(self, content: Any) -> list[Image]:
         """Images a tool returned (a read image file, an MCP screenshot) are kept for the player;
@@ -1219,12 +1341,21 @@ def _stream_failure_message(error: Exception) -> str:
     return f"{_INTERRUPTED_MESSAGE} ({cause}). Restoring the conversation; the workspace and its changes are kept."
 
 
-CODEX_CAPABILITIES = AgentCapabilities(streaming=True, thinking=True, questions=True, interrupt=True, images=True)
+CODEX_CAPABILITIES = AgentCapabilities(streaming=True, thinking=True, questions=True, interrupt=True, images=True,
+                                       asides=True)
 
 # Full access, like the Claude adapter: Codex never asks for approvals and runs unsandboxed
 # inside the session's own clone. Only the agent's own questions reach the player.
 _CODEX_ACCESS = {"approvalPolicy": "never", "sandbox": "danger-full-access"}
 _CODEX_FILE_TOOLS = {"add": "Write", "delete": "Edit", "update": "Edit"}
+# Codex collab calls other than `spawnAgent` are the main agent managing its delegates: steps.
+_CODEX_COLLAB_TOOLS = {"sendInput": "MessageAgent", "sendMessage": "MessageAgent", "followupTask": "MessageAgent",
+                       "resumeAgent": "ResumeAgent", "wait": "WaitAgent", "closeAgent": "CloseAgent",
+                       "interruptAgent": "InterruptAgent", "listAgents": "ListAgents"}
+# `shutdown` follows any end once the agent is closed and `notFound` says nothing about the work:
+# neither may overwrite how the agent finished.
+_CODEX_AGENT_STATUSES = {"pendingInit": "started", "running": "working", "completed": "completed",
+                         "errored": "failed", "interrupted": "interrupted"}
 
 
 def _codex_file_steps(item: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
@@ -1292,6 +1423,8 @@ class CodexAgentRuntime:
         self._interrupted = False
         self._closing = False
         self._open_steps: set[str] = set()
+        # Codex thread id of each delegated agent -> the `spawnAgent` call that delegated it.
+        self._delegations: dict[str, str] = {}
 
     async def _publish(self, event):
         await self._emit(event["type"], event["data"])
@@ -1457,6 +1590,26 @@ class CodexAgentRuntime:
             finally:
                 self._client = None
 
+    async def aside(self, question):
+        """Answers in an ephemeral, read-only fork of the thread on its own connection, beside any turn."""
+        from mic_sessions.shared import codex
+        if self._closing or self._account is None:
+            raise ApiException.conflict("Codex session is closed")
+        params = {**self._thread_params(), "approvalPolicy": "never", "sandbox": "read-only", "ephemeral": True}
+        async with asyncio.timeout(_ASIDE_TIMEOUT_SECONDS):
+            # No request handler: anything the fork asks for is declined.
+            async with codex.connected(self._account, self._workspace) as client:
+                thread = (await client.call("thread_fork", self._thread_id, params) if self._thread_id
+                          else await client.call("thread_start", params))
+                turn = await client.call("turn_start", thread.thread.id,
+                                         [{"type": "text", "text": _aside_prompt(question)}],
+                                         {"model": self._config.model, "effort": self._config.effort})
+                async for method, payload in client.notifications(turn.turn.id):
+                    if method == "item/agentMessage/delta" and payload.get("delta"):
+                        yield payload["delta"]
+                    elif method == "turn/completed" and payload["turn"]["status"] != "completed":
+                        raise RuntimeError("Codex could not answer the side question")
+
     async def recover(self):
         """Each turn opens its own connection, so a broken one already ended its turn: only the
         workspace and the account need to be in place again."""
@@ -1547,6 +1700,8 @@ class CodexAgentRuntime:
                 await self._file_change(item, done)
             elif kind in ("imageGeneration", "imageView"):
                 await self._image_item(item, done)
+            elif kind == "collabAgentToolCall":
+                await self._collab_item(item, done)
             elif kind not in ("agentMessage", "reasoning", "userMessage", "contextCompaction"):
                 name = {"commandExecution": "Bash", "webSearch": "WebSearch"}.get(kind, kind or "Tool")
                 if not done:
@@ -1557,6 +1712,52 @@ class CodexAgentRuntime:
                                                    _result_summary(item.get("aggregatedOutput") or item)))
         elif method == "error" and not payload.get("willRetry"):
             await self._publish(agent_error("Codex reported an error. Retry or reconnect your account."))
+
+    async def _collab_item(self, item, done):
+        """Codex delegation. A `spawnAgent` call becomes the delegation itself, outliving its call
+        (the agent keeps working after it); the other collab calls are steps of the main agent, and
+        the agent states they report update each delegation. Codex streams a delegate's own activity
+        on a turn of its own thread, which never reaches this turn."""
+        identity = item.get("id") or uuid4().hex
+        tool = item.get("tool")
+        failed = item.get("status") in ("failed", "interrupted")
+        if tool == "spawnAgent":
+            if identity not in self._open_steps:
+                self._open_steps.add(identity)
+                prompt = str(item.get("prompt") or "")
+                input_data = {key: value for key, value in (
+                    ("prompt", prompt), ("model", item.get("model")), ("reasoningEffort", item.get("reasoningEffort")),
+                ) if value}
+                await self._publish(tool_use(identity, "Agent", (prompt.strip().splitlines() or ["Delegated task"])[0][:_TITLE_LIMIT],
+                                             input_data))
+                await self._publish(subagent_updated(identity, status="started", detached=True, streamsActivity=False))
+            for thread in item.get("receiverThreadIds") or []:
+                self._delegations[thread] = identity
+            if done and failed:
+                await self._publish(subagent_updated(identity, status="failed",
+                                                     summary="Codex could not start the agent."))
+        else:
+            name = _CODEX_COLLAB_TOOLS.get(tool, "Agent" + str(tool or "Tool"))
+            if identity not in self._open_steps:
+                self._open_steps.add(identity)
+                count = len(item.get("receiverThreadIds") or [])
+                title = str(item.get("prompt") or "") or f"{count} agent{'s' if count != 1 else ''}"
+                await self._publish(tool_use(identity, name, title.strip()[:_TITLE_LIMIT],
+                                             {"prompt": item.get("prompt")} if item.get("prompt") else {}))
+            if done:
+                self._open_steps.discard(identity)
+                states = item.get("agentsStates") or {}
+                summary = "\n\n".join(f"{state.get('status')}: {state.get('message')}" if state.get("message")
+                                       else str(state.get("status")) for state in states.values()) or str(item.get("status"))
+                await self._publish(tool_result(identity, failed, _result_summary(summary)))
+        for thread, state in (item.get("agentsStates") or {}).items():
+            delegation = self._delegations.get(thread)
+            status = _CODEX_AGENT_STATUSES.get(state.get("status")) if isinstance(state, dict) else None
+            if delegation and status:
+                message = state.get("message")
+                await self._publish(subagent_updated(
+                    delegation, agentId=thread, status=status,
+                    summary=message if isinstance(message, str) and message and status in ("completed", "failed") else None))
 
     async def _image_item(self, item, done):
         """A native generation renders as `ImageGeneration` and a viewed file as `ViewImage`. The
