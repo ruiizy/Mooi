@@ -10,9 +10,8 @@
 # Session deployments are sibling containers on the host engine (mounted socket); they join only the
 # external `mooi-previews` network and are never published.
 #
-# Project, containers and networks are all `mooi-prod*`, disjoint from the development stack (root
-# compose.yml, project `mooi`): running one can never recreate or join the other. Session agents
-# additionally run Compose under their own COMPOSE_PROJECT_NAME.
+# Production uses its own `mooi-prod` project and data. Development stacks use root compose.yml
+# with each session's assigned COMPOSE_PROJECT_NAME and generated resource names and ports.
 
 name: mooi-prod
 

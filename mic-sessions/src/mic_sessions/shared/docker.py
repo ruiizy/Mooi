@@ -1127,7 +1127,7 @@ class Docker:
     async def cleanup(
         self, *, manifests: DockerManifests, session_id: UUID, deadline: float | None = None,
     ) -> None:
-        """Final session cleanup, including owned data. Never prune or remove images.
+        """Final session cleanup: containers, owned data, networks and the images built for it.
 
         Caller cancels/joins start and serializes this with all session mutations.
         A missing record is idempotent; a corrupt record is retained and fails closed.
@@ -1160,9 +1160,15 @@ class Docker:
                     result = await self._run(kind, 'rm', name, cwd=directory, deadline=end)
                     if result.returncode:
                         raise DockerError('cleanup_failed', 'Deployment resource could not be removed')
+            # Built images too, including the untagged layers earlier rebuilds left behind.
+            for image_id in await self._project_resources('image', manifest.project_name, cwd=directory, deadline=end):
+                result = await self._run('image', 'rm', '--force', image_id, cwd=directory, deadline=end)
+                if result.returncode and 'No such image' not in result.stderr:
+                    raise DockerError('cleanup_failed', 'Deployment image could not be removed')
             if (await self._container_ids(manifest, deadline=end)
                     or await self._resource_names(manifest, 'volume', deadline=end)
-                    or await self._resource_names(manifest, 'network', deadline=end)):
+                    or await self._resource_names(manifest, 'network', deadline=end)
+                    or await self._project_resources('image', manifest.project_name, cwd=directory, deadline=end)):
                 raise DockerError('cleanup_failed', 'Deployment resources remain after cleanup')
             manifests._remove_stopped(session_id)
         except (DockerError, DockerManifestError, asyncio.CancelledError):
@@ -1170,6 +1176,54 @@ class Docker:
             manifests.save(current.model_copy(update={'cleanup_state': 'failed',
                                                        'updated_at': datetime.now(UTC)}))
             raise
+
+    async def _project_resources(
+        self, kind: Literal['container', 'volume', 'network', 'image'], project: str, *, cwd: Path, deadline: float,
+    ) -> tuple[str, ...]:
+        listing = ('ps', '--all', '--no-trunc') if kind == 'container' else (kind, 'ls')
+        field = '{{.Name}}' if kind == 'volume' else '{{.ID}}'
+        result = await self._run(*listing, *(('--all', '--no-trunc') if kind == 'image' else ()), '--filter',
+                                 f'label=com.docker.compose.project={project}', '--format', field,
+                                 cwd=cwd, deadline=deadline)
+        values = tuple(dict.fromkeys(result.stdout.split()))
+        if (result.returncode or result.truncated
+                or any(not re.fullmatch(r'(?:sha256:)?[a-zA-Z0-9][a-zA-Z0-9_.-]*', value) for value in values)):
+            raise DockerError('cleanup_failed', 'Compose project resources could not be listed')
+        return values
+
+    async def remove_compose_project(self, project: str, *, cwd: Path, deadline: float) -> None:
+        """Remove everything Compose labelled with this exact project: containers, volumes,
+        networks and the images it built. Pulled base images carry no project label."""
+        if not re.fullmatch(r'[a-z0-9][a-z0-9_-]*', project):
+            raise DockerError('cleanup_failed', 'Invalid Compose project name')
+        removals = (('container', ('rm', '--force', '--volumes')), ('volume', ('volume', 'rm', '--force')),
+                    ('network', ('network', 'rm')), ('image', ('image', 'rm', '--force')))
+        for kind, command in removals:
+            for value in await self._project_resources(kind, project, cwd=cwd, deadline=deadline):
+                result = await self._run(*command, value, cwd=cwd, deadline=deadline)
+                if result.returncode and 'No such' not in result.stderr:
+                    raise DockerError('cleanup_failed', f'Compose project {kind} could not be removed')
+
+    async def compose_projects(self, pattern: str, *, cwd: Path, deadline: float) -> tuple[str, ...]:
+        """Compose projects matching pattern (whole name) across containers, volumes, networks and
+        built images."""
+        projects: set[str] = set()
+        template = '{{.Label "com.docker.compose.project"}}'
+        for listing in (('ps', '--all'), ('volume', 'ls'), ('network', 'ls')):
+            result = await self._run(*listing, '--filter', 'label=com.docker.compose.project',
+                                     '--format', template, cwd=cwd, deadline=deadline)
+            if result.returncode or result.truncated:
+                raise DockerError('cleanup_failed', 'Compose projects could not be listed')
+            projects.update(result.stdout.split())
+        # Images cannot render labels: Compose tags what it builds `<project>-<service>`.
+        result = await self._run('image', 'ls', '--filter', 'label=com.docker.compose.project',
+                                 '--format', '{{.Repository}}', cwd=cwd, deadline=deadline)
+        if result.returncode or result.truncated:
+            raise DockerError('cleanup_failed', 'Compose projects could not be listed')
+        matched = {project for project in projects if re.fullmatch(pattern, project)}
+        matched.update(found[1] for image in result.stdout.split()
+                       if (found := re.match(f'({pattern})-', image)))
+        return tuple(sorted(matched))
 
     async def preflight(self, *, cwd: Path, deadline: float | None = None) -> DockerPreflight:
         """Check Compose v2+ and reach the configured daemon, without creating resources."""
@@ -1195,49 +1249,3 @@ class Docker:
             if network.returncode or network.stdout.strip() != self.settings.preview_network:
                 raise DockerError("docker_unavailable", "The preview network does not exist on the engine")
         return DockerPreflight(engine_version=engine_version, compose_version=version)
-
-
-async def _dev_command(command: str) -> int:
-    """Makefile-only maintenance; cleanup requires the service to be stopped first."""
-    # Maintenance does not authenticate to Mooi or require provider credentials.
-    settings = Settings()
-    docker = Docker(settings)
-    if command == "preflight":
-        await docker.preflight(cwd=Path.cwd())
-        print("Deployment Docker preflight passed")
-        return 0
-
-    directory = settings.workspace_root / "deployments"
-    if not directory.exists() and not directory.is_symlink():
-        print("No deployment records to clean")
-        return 0
-    manifests = DockerManifests(settings.workspace_root)
-    failed = 0
-    for session_id in manifests.session_ids():
-        try:
-            manifests.load(session_id)
-            await docker.cleanup(manifests=manifests, session_id=session_id)
-        except (DockerError, DockerManifestError, OSError):
-            failed += 1
-            print(f"Deployment {session_id}: cleanup failed; records and workspace retained")
-    if failed:
-        print("Restore Docker/records and retry make dev-stop-mic-sessions")
-        return 1
-    print("Managed deployments cleaned; workspaces and shared images retained")
-    return 0
-
-
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Managed deployment maintenance via the root Makefile")
-    parser.add_argument("command", choices=("preflight", "cleanup"))
-    try:
-        raise SystemExit(asyncio.run(_dev_command(parser.parse_args().command)))
-    except DockerError as error:
-        print(f"Deployment maintenance failed ({error.code}); check DOCKER_BINARY, DOCKER_HOST and Compose v2")
-        raise SystemExit(1) from None
-    except (DockerManifestError, OSError, ValueError):
-        # Never expose Compose content, private paths, environment or subprocess output.
-        print("Deployment maintenance failed; check Docker configuration and preserved records")
-        raise SystemExit(1) from None

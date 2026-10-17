@@ -3,6 +3,7 @@ import { CornerDownLeft, LoaderCircle, Sparkles } from 'lucide-react';
 import type { AgentConnection } from '@/features/agents/types/AgentConnection';
 import type { PlatformAgentCopy } from '@/features/platform/types/PlatformAgentCopy';
 import type { PlatformChatRequest } from '@/features/platform/types/PlatformChatRequest';
+import { useDictation } from '@/features/dictation/hooks/useDictation';
 import { DictationButton } from '@/features/dictation/components/DictationButton';
 import { AgentModelFields } from '@/features/sessions/components/AgentModelFields';
 import { useAgentModelChoice } from '@/features/sessions/hooks/useAgentModelChoice';
@@ -30,11 +31,13 @@ export const PlatformAgentDialog = ({ copy, projectName, connections, busy, erro
   replaceNotice, buildMessage, onClose, onSubmit }: PlatformAgentDialogProps) => {
   const choice = useAgentModelChoice(true, connections);
   const promptRef = useRef<HTMLTextAreaElement>(null);
+  const dictation = useDictation(promptRef);
   const [prompt, setPrompt] = useState('');
   const valid = choice.ready && (optionalPrompt || prompt.trim().length > 0);
 
   const submit = () => {
     if (!valid || busy) return;
+    dictation.finish();
     onSubmit({ provider: choice.provider, connectionId: choice.connectionId, model: choice.model,
       effort: choice.effort || null, message: buildMessage(prompt) });
   };
@@ -69,7 +72,7 @@ export const PlatformAgentDialog = ({ copy, projectName, connections, busy, erro
             <span className="inline-flex items-center gap-1.5 pointer-coarse:invisible"><CornerDownLeft className="size-3.5" />Enter to start · Shift+Enter for a new line</span>
             <span className="inline-flex items-center gap-2">
               <span className="tabular-nums">{prompt.length > 0 ? prompt.length : ''}</span>
-              <DictationButton field={promptRef} disabled={busy} className="size-8" />
+              <DictationButton field={promptRef} dictation={dictation} disabled={busy} className="size-8" />
             </span>
           </div>
         </div>

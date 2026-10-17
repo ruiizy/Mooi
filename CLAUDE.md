@@ -18,9 +18,7 @@ This is a monorepository which contains a whole application with different techn
 
 - Just preserve a single README.md at project root with only information about how to run and set up the application. Information must be properly structured and be so concise with just essentials words covering all aspects
 
-- The application in dev must be handled only through the root `Makefile`. Use `make dev-start`, `make dev-stop`, `make dev-restart`, `make dev-status` and `make dev-clean` for the whole application, and their `dev-<command>-<artifact-name>` variants for a single artifact. Never run a package manager, a build tool, docker or docker compose directly to start, stop, inspect or clean the application in dev
-
-- After each iteration you must make a whole restart of the application
+- Use root `compose.yml` for development session deployments and `deploy/production/compose.prod.yml` for production. Keep each session's assigned Compose project; use generated resource names and host ports. Only manage resources owned by that session. Do not restart or deploy automatically after code changes
 
 # Tech Aspects
 
@@ -107,7 +105,7 @@ Each transversal aspect should be totally self-contained. Only relevant infrastr
 
 - It uses Python 3.13 as programming language
 
-- It uses `uv` as package manager, with idiomatic Python packaging (`pyproject.toml`, `uv.lock`, `.python-version`, `src/mic_sessions/` layout). Never invoke `uv` directly to run the application, only the root `Makefile`
+- It uses `uv` as package manager, with idiomatic Python packaging (`pyproject.toml`, `uv.lock`, `.python-version`, `src/mic_sessions/` layout)
 
 - It uses FastAPI with uvicorn as web framework
 

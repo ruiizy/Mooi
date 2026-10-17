@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
-import { Link, useLocation, useSearchParams } from 'react-router-dom';
-import { MessagesSquare, Plus, RefreshCw, Search } from 'lucide-react';
+import { useLocation, useSearchParams } from 'react-router-dom';
+import { MessagesSquare, RefreshCw, Search } from 'lucide-react';
 import { ROUTES } from '@/app/routes';
 import { useProjects } from '@/features/projects/hooks/useProjects';
 import { SessionGroupSection } from '@/features/sessions/components/overview/SessionGroupSection';
@@ -15,7 +15,6 @@ import { Card } from '@/shared/components/Card';
 import { EmptyState } from '@/shared/components/EmptyState';
 import { Tabs } from '@/shared/components/Tabs';
 import type { BackLink } from '@/shared/types/BackLink';
-import { buttonStyles } from '@/shared/styles/buttonStyles';
 import { useSessionsStore } from '@/stores/sessionsStore';
 import { useSessionsSyncStore } from '@/stores/sessionsSyncStore';
 
@@ -86,10 +85,7 @@ export const SessionsPage = () => {
 
       {!firstLoad && sessions.length === 0 && !error ? (
         <EmptyState icon={MessagesSquare} title="No live sessions"
-          description="Start a session to have an agent work on one of your projects. It shows up here while it runs.">
-          <Button variant="brand" onClick={() => setNewSessionOpen(true)}><Plus className="size-4" />New session</Button>
-          <Link to={ROUTES.projects} className={buttonStyles('secondary', 'md')}>Browse projects</Link>
-        </EmptyState>
+          description="Start a session to have an agent work on one of your projects. It shows up here while it runs." />
       ) : null}
 
       {sessions.length > 0 ? (

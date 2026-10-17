@@ -1135,6 +1135,13 @@ async def _cleanup_workspace(session: Session) -> None:
             LOG.exception("Session %s runtime shutdown failed; retaining workspace", session.id)
             return
         session.runtime = None
+    if session.kind == "session":
+        # The agent can no longer run Compose: whatever it started dies with the session.
+        try:
+            await _remove_session_compose(session.id)
+        except Exception:
+            LOG.warning("Session %s Compose resources could not be removed; next boot retries", session.id,
+                        exc_info=True)
     if docker_clean and session.workspace != _UNSET_PATH:
         try:
             await workspaces.remove_workspace(session.id)
@@ -1940,13 +1947,58 @@ Use Python urllib with an inline JSON body, never a temporary file, and send the
 ## Shared Docker host
 Docker here is the host's shared engine: other projects' live containers, volumes and networks (production ones included) run on it, and the same names may appear in this repository.
 - Compose commands are scoped to this session's project through `COMPOSE_PROJECT_NAME={_compose_project(session)}`; keep it, never pass `--project-name`/`-p` or override it.
-- Only act on resources labelled `com.docker.compose.project={_compose_project(session)}`. Never stop, remove, recreate, prune or attach to anything else, even when a name conflicts: report the conflict to the user instead."""
+- Only act on resources labelled `com.docker.compose.project={_compose_project(session)}`. Never stop, remove, recreate, prune or attach to anything else, even when a name conflicts: report the conflict to the user instead.
+- Other sessions run the same repository side by side: let the engine pick host ports (`"5432"`, never `"54983:5432"`) and never set `container_name` or explicit volume/network names. Everything in this project is removed when the session is deleted."""
 
 
 def _compose_project(session: Session) -> str:
     """Compose project of a plain session's own commands, distinct from the host's stacks and from
-    its Deploy preview project."""
-    return f"mooi-session-{session.id.hex[:12]}"
+    its Deploy preview project. The installation part lets each Mooi sweep only its own leftovers;
+    without a readable identity it falls back to the unscoped name teardown still removes."""
+    try:
+        return f"{_session_compose_prefix()}{session.id.hex[:12]}"
+    except DockerManifestError:
+        return f"mooi-session-{session.id.hex[:12]}"
+
+
+def _session_compose_prefix() -> str:
+    return f"mooi-session-{_deployment_storage().installation_id.hex[:12]}-"
+
+
+async def _remove_session_compose(session_id: UUID) -> None:
+    """Containers, volumes, networks and images a session's own Compose commands created; the
+    unscoped name is what sessions used before the installation part existed."""
+    settings = get_settings()
+    loop = asyncio.get_running_loop()
+    projects = {f"mooi-session-{session_id.hex[:12]}"}
+    try:
+        projects.add(f"{_session_compose_prefix()}{session_id.hex[:12]}")
+    except DockerManifestError:
+        pass
+    for project in sorted(projects):
+        await Docker().remove_compose_project(project, cwd=settings.workspace_root,
+                                              deadline=loop.time() + settings.deployment_stop_timeout_seconds)
+
+
+async def reconcile_session_compose() -> None:
+    """Boot-only, after reconcile_deployments: sessions never survive a restart, so every Compose
+    project of this installation's sessions is a leftover, and so is every preview project whose
+    record is gone (its images outlived it). Records kept for recovery and other installations on
+    the same engine keep theirs."""
+    settings = get_settings()
+    try:
+        docker, loop, manifests = Docker(), asyncio.get_running_loop(), _deployment_storage()
+        installation = manifests.installation_id.hex
+        pattern = f"{re.escape(_session_compose_prefix())}[0-9a-f]{{12}}|mooi-{installation}-[0-9a-f]{{32}}"
+        for project in await docker.compose_projects(pattern, cwd=settings.workspace_root,
+                                                     deadline=loop.time() + settings.docker_command_timeout_seconds):
+            preview = project.removeprefix(f"mooi-{installation}-")
+            if preview != project and manifests.directory(UUID(preview)).exists():
+                continue
+            await docker.remove_compose_project(project, cwd=settings.workspace_root,
+                                                deadline=loop.time() + settings.deployment_stop_timeout_seconds)
+    except Exception:
+        LOG.warning("Session Compose leftovers could not be removed", exc_info=True)
 
 
 def _session_environment(session: Session) -> dict[str, str]:
@@ -2109,12 +2161,17 @@ The production configuration is exactly three VIRTUAL documents stored only in t
 
 Save each document with the platform API as soon as you write or change it, one document per request, so the user follows your progress in the Platform files tab.
 
+## Production Compose in the repository
+When production uses Docker Compose, its definition MUST be a tracked `docker-compose.yml` at the repository root, visible in Changes and committed through the repository commit endpoint. Keep DEPLOYMENT.md, deploy.sh and status.sh in Platform files. Never embed, generate or store the Compose definition in those documents.
+Read an existing root Compose first. Preserve the session preview and application behaviour; if it differs from production, use a separate root `docker-compose.yml` for production and explicit `-f` paths in deployment commands. deploy.sh must consume the Compose from the selected release checkout (and transfer that same file when deploying remotely), with environment values supplied securely to the target process. Never depend on the chat workspace or a newer branch version. status.sh must still work from an empty directory, checking the live deployment without embedding Compose.
+Every configurable Compose value must use environment interpolation. Every sensitive value must come from `MOOI_PRODUCTION_` or inherited `MOOI_DEVELOPMENT_` variables, without literal secrets or secret defaults in tracked files. Persist production values through the existing environment endpoint, never in the repository. Explicitly reference each required Compose variable in deploy.sh (for example `${{MOOI_PRODUCTION_NAME:?required}}`) so the platform detects missing values before deploying, including variables forwarded over SSH.
+
 ## Environment
 Scripts read configuration only from variables named `MOOI_PRODUCTION_<NAME>` and the project's development variables `MOOI_DEVELOPMENT_<NAME>`, which they inherit from the project's sessions: reuse a development value (an API key, a service URL...) when production needs exactly the same one, and give production its own `MOOI_PRODUCTION_` variable when it must differ. The platform provides `MOOI_PRODUCTION_RELEASE_TAG`, `MOOI_PRODUCTION_RELEASE_SHA` and `MOOI_PRODUCTION_RELEASE_URL`. Every other `MOOI_PRODUCTION_` or `MOOI_DEVELOPMENT_` variable the scripts mention without a shell default (`${{NAME:-default}}`) is required. Ask the user for each missing value (hosts, users, keys, tokens, domains...) and never invent credentials. Save the `MOOI_PRODUCTION_` values the user gives you with the environment endpoint; the user can also set them in the Environment section of the deployment overview. Development values belong to the project's sessions: ask the user to set a missing one from any session. Read the stored values with the environment endpoint whenever you need them, and tell the user a value only when they ask for it.
 
 ## Repository changes
-Only when the deployment truly needs files inside the repository (for example a Dockerfile, a Compose file or a CI workflow), create or edit them in the working directory: the user sees them in the Changes tab. Never change application behaviour for it.
-Before committing, ask the user whether to commit and push them to `{branch}`, listing every changed file (use your question tool when available, otherwise ask and wait for the reply). Only after an explicit yes, publish them with the commit endpoint; never run `git commit` or `git push` yourself. If the user declines, revert those files and adapt the deployment without them.
+A production Compose definition always belongs in the repository. Other deployment files (for example a Dockerfile or a CI workflow) belong there when needed. Create or edit them in the working directory: the user sees them in the Changes tab. Never change application behaviour for it.
+Before committing, ask the user whether to commit and push them to `{branch}`, listing every changed file (use your question tool when available, otherwise ask and wait for the reply). Only after an explicit yes, publish them with the commit endpoint; never run `git commit` or `git push` yourself. If the user declines, revert those files; never fall back to embedding Compose in Platform files.
 
 ## Platform API
 Use Python urllib with an inline JSON body, never a temporary file, and send the header `X-Production-Edit-Token: {session.agent_token}`:
@@ -3463,7 +3520,7 @@ The working directory is this session's branch `{session.branch}`. This conversa
 {request}{failure}
 ## How Mooi deploys
 - It resolves the single Compose file at the repository root (`compose.yaml`, `compose.yml`, `docker-compose.yaml` or `docker-compose.yml`), with the root `.env` when present and the project's development environment variables (`MOOI_DEVELOPMENT_<NAME>`) for interpolation.
-- It builds every service with a `build` section and starts all of them.
+- It builds every service with a `build` section and starts all of them in a Compose project of its own: volumes, networks and images are renamed per session, so previews of any session never collide, and all of them are removed when the session is deleted.
 - It reads exactly one published TCP port, the one of the service building the web frontend (a Vite, React, Vue, Angular or Next package), or the only one of an API-only product, and then removes every publication: no container is ever reachable from outside.
 - It waits for every container healthcheck, then expects `GET /` on that port to answer 2xx/3xx, with an HTML document when there is a frontend.
 - With a frontend, that HTML must reference no root-absolute URL (`src`, `href`, `action`) outside `MOOI_PREVIEW_BASE_PATH`; otherwise the deployment fails listing them.

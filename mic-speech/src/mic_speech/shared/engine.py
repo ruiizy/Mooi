@@ -1,14 +1,12 @@
 """Transversal aspect: the native speech engine (NVIDIA NeMo-Speech.cpp) as a supervised child process.
 
-Provisioning runs from the dev entrypoint before the service starts (`python -m
-mic_speech.shared.engine provision`): it downloads the pinned runtime release for this platform,
-verifies its SHA-256 and resolves the model through the runtime's own pinned index, so the slow
-first download never races the service health check.
+The production image includes the pinned, SHA-256-checked runtime. The container entrypoint
+resolves and downloads the model through the runtime's pinned index before starting the service,
+so the first download never races the service health check.
 
 The service then starts the engine once at boot, bound to a free loopback port, keeps the model
 resident for every dictation and stops it on shutdown (SIGTERM, then SIGKILL after 5 s). The
-engine shares the service process group, so a group kill from the dev entrypoint never leaves an
-orphan `nemo-speech` behind.
+engine is stopped with the service on shutdown.
 """
 
 from __future__ import annotations
@@ -138,7 +136,7 @@ class Engine:
     async def start(self) -> None:
         binary = resolve_binary(self._settings)
         if binary is None:
-            raise RuntimeError("nemo-speech runtime not found: run `make dev-start-mic-speech` or set SPEECH_RUNTIME_PATH")
+            raise RuntimeError("nemo-speech runtime not found: rebuild the mic-speech image or set SPEECH_RUNTIME_PATH")
         self._port = _free_port()
         self._process = await asyncio.create_subprocess_exec(
             str(binary), "serve", "--host", "127.0.0.1", "--port", str(self._port),

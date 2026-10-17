@@ -25,6 +25,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     settings.workspace_root.mkdir(parents=True, exist_ok=True)
     preserved = await sessions.reconcile_deployments()
+    await sessions.reconcile_session_compose()
     if preserved is not None:
         await workspaces.get_workspaces().reconcile(preserve=preserved)
     await web.open_http_client()

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Bot, Pencil, Plus, RefreshCw, TriangleAlert, Unlink } from 'lucide-react';
+import { Bot, Pencil, Plus, RefreshCw, Star, TriangleAlert, Unlink } from 'lucide-react';
 import { AddAgentAccountDialog } from '@/features/agents/components/AddAgentAccountDialog';
 import { useAgentConnections } from '@/features/agents/hooks/useAgentConnections';
 import type { AgentConnection } from '@/features/agents/types/AgentConnection';
@@ -13,7 +13,7 @@ const accountTitle = (connection: AgentConnection) => connection.name || connect
 
 export const AgentConnectionsCard = () => {
   const { providers, connections, status, error, busy, actionError, startOauth, connectToken,
-    disconnect, rename, reload, clearActionError } = useAgentConnections();
+    disconnect, rename, setDefaultAccount, reload, clearActionError } = useAgentConnections();
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<AgentConnection | null>(null);
   const [name, setName] = useState('');
@@ -22,7 +22,7 @@ export const AgentConnectionsCard = () => {
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div>
         <h2 className="text-sm font-extrabold tracking-[-0.02em] text-ink">Agent accounts</h2>
-        <p className="mt-1 text-xs text-ink-subtle">Choose which account runs each session.</p>
+        <p className="mt-1 text-xs text-ink-subtle">Set the account preselected for new agent sessions.</p>
       </div>
       <Button variant="secondary" size="sm" disabled={busy || providers.length === 0}
         onClick={() => { clearActionError(); setAdding(true); }}>
@@ -52,11 +52,18 @@ export const AgentConnectionsCard = () => {
           <p className="truncate text-sm font-semibold text-ink">{accountTitle(connection)}</p>
           <p className="mt-0.5 flex items-center gap-1.5 text-xs text-ink-subtle">
             {connection.label}
+            {connection.defaultAccount && <span className="font-semibold text-brand">Default</span>}
             {connection.stale && <span className="inline-flex items-center gap-1 text-warning"><TriangleAlert className="size-3" /> Needs attention</span>}
           </p>
         </div>
         {/* Icon actions keep the account name readable on phones; the labels live in title and aria-label. */}
         <div className="flex shrink-0 items-center gap-1.5">
+          <button type="button" aria-label={`${connection.defaultAccount ? 'Clear default account' : `Use ${accountTitle(connection)} by default`}`}
+            title={connection.defaultAccount ? 'Clear default account' : 'Use by default'} aria-pressed={connection.defaultAccount}
+            disabled={busy} className={cn(iconAction, connection.defaultAccount && 'text-brand')}
+            onClick={() => void setDefaultAccount(connection.defaultAccount ? null : connection.id)}>
+            <Star className={cn('size-4', connection.defaultAccount && 'fill-current')} />
+          </button>
           <button type="button" aria-label={`Rename ${accountTitle(connection)}`} title="Rename" disabled={busy} className={iconAction}
             onClick={() => { clearActionError(); setEditing(connection); setName(connection.name || accountTitle(connection)); }}>
             <Pencil className="size-4" />

@@ -8,45 +8,29 @@ Monorepository. Each artifact lives in its own root-level directory.
 | `mic-mooi` | Spring Boot microservice (API) |
 | `mic-sessions` | FastAPI microservice (real-time agent sessions) |
 | `mic-speech` | FastAPI microservice (local push-to-talk dictation, loopback only) |
-| `compose.yml` | Mooi session preview stack only (Deploy button of a Mooi session) |
-| `deploy/development/` | Postgres + pgAdmin data layer (`make dev-*`, project `mooi`) |
+| `compose.yml` | Development session stack (Deploy button preview) |
 | `deploy/production/` | Production stack (`compose.prod.yml`, project `mooi-prod`) |
 
 ## Requirements
 
-- GNU Make >= 4 (macOS ships 3.81 — install with `brew install make`, exposed as `gmake`; the root `Makefile` delegates to it automatically)
-- [Bun](https://bun.sh) >= 1.3 (falls back to npm)
-- Java 25
-- [uv](https://docs.astral.sh/uv/) (Python package manager for `mic-sessions` and `mic-speech`)
-- `git` CLI >= 2.38 (one independent clone per agent session; `merge-tree --write-tree` backs Merge)
-- Docker Engine + Docker Compose V2 (data layer and session deployments)
-- Node.js >= 20 with npm (`mic-sessions` installs its pinned browser tools)
-
-Maven is **not** required: `mic-mooi` ships the Maven Wrapper (`mvnw`) and the first
-`make dev-start` downloads the pinned distribution into `~/.m2/wrapper`.
+Docker Engine + Compose V2. Toolchains, SDKs and browser dependencies are installed by the service
+Dockerfiles; no native development launcher is required.
 
 ## Setup
 
-```bash
-cp .env.example .env
-cp mic-mooi/.env.example mic-mooi/.env
-cp mic-sessions/.env.example mic-sessions/.env
-cp mic-speech/.env.example mic-speech/.env
-cp spa-mooi/.env.example spa-mooi/.env
-```
-
-Configuration lives in each artifact's `.env`, plus the root `.env` for the data layer and the dev
-entrypoint. Set your own credentials before the first run.
+- **Development sessions:** use root `compose.yml` through the session's **Deploy** button. Store
+  `MOOI_DEVELOPMENT_*` credentials in the Mooi platform; see *Previewing Mooi itself* below.
+- **Production:** use `deploy/production/compose.prod.yml` and its `.env.example`; see *Production* below.
+- Root `.env.example` contains optional database settings only. Do not store platform credentials in
+  the repository or copy production accounts into development previews.
 
 ### Google OAuth2
 
 1. Create an OAuth 2.0 Client ID (type *Web application*) in the Google Cloud console.
-2. Authorized JavaScript origin: `http://localhost:28471` (the pinned SPA dev port, see
-   *Dev ports* below). No redirect URI is needed (Google
-   Identity Services returns the ID token in the browser).
-3. Set in `mic-mooi/.env`: `GOOGLE_CLIENT_ID`, `JWT_SECRET` (>= 32 bytes), `ADMIN_EMAILS`
-   (comma separated), `CORS_ORIGIN`.
-4. Set in `spa-mooi/.env`: `VITE_API_BASE_URL`, `VITE_GOOGLE_CLIENT_ID` (same client id).
+2. Authorized JavaScript origin: `https://<DOMAIN>`. No redirect URI is needed: Google
+   Identity Services returns the ID token in the browser.
+3. Set `GOOGLE_CLIENT_ID`, `JWT_SECRET` (>= 32 bytes) and `ADMIN_EMAILS` (comma separated) in the
+   production environment file. Compose wires CORS and the frontend client id automatically.
 
 The first sign-in of an address listed in `ADMIN_EMAILS` creates that player with the admin role;
 adding an address later never promotes an existing player.
@@ -63,11 +47,11 @@ Links a GitHub account to an existing player. It never signs anyone in — sign-
    Read and write**. Administration is required to create and delete GitHub repositories from
    Mooi. Existing installations must accept the updated permissions on GitHub. Select **All
    repositories** during installation so newly created repositories are available to sessions.
-4. Callback URL: `http://localhost:28471/account/github/callback` (pinned SPA dev port; `make`
-   exports the matching `GITHUB_REDIRECT_URI` automatically).
-5. Generate a client secret, then set in `mic-mooi/.env`: `GITHUB_CLIENT_ID`,
+4. Callback URL: `https://<DOMAIN>/account/github/callback`; production Compose supplies
+   the matching `GITHUB_REDIRECT_URI`.
+5. Generate a client secret, then set in the production environment file: `GITHUB_CLIENT_ID`,
    `GITHUB_CLIENT_SECRET`.
-6. Set `GITHUB_APP_SLUG` in `mic-mooi/.env` to the app's URL slug (the last segment of
+6. Set `GITHUB_APP_SLUG` in the production environment file to the app's URL slug (the last segment of
    `https://github.com/apps/<slug>`). It backs the **Repository access** action, which is the
    install-and-authorize page — without it players are sent to their GitHub installations screen
    instead, one step longer.
@@ -88,32 +72,28 @@ The SPA needs no GitHub variable: it asks the API for ready-made authorize and i
 
 Claude and Codex sessions include the `playwright` MCP by default: headless Chromium,
 an isolated browser context per MCP process and full file access. The runtime image installs
-Playwright, its matching Chromium revision and system libraries at build time. Local
-`make dev-start` installs the locked npm dependencies and Chromium automatically; on Linux,
-install browser system libraries once with
-`cd mic-sessions/browser && node node_modules/playwright/cli.js install-deps chromium`
-(requires administrator privileges). `AGENT_BROWSER_DIRECTORY` overrides the installation path.
+Playwright, its matching Chromium revision and system libraries at build time.
+`AGENT_BROWSER_DIRECTORY` overrides the installation path.
 
 Links a player's own Claude or Codex account so `mic-sessions` can run agent sessions on their behalf.
 Credentials are stored by `mic-mooi` and handed to `mic-sessions` server-to-server; the browser
 never sees a raw token.
 
-1. Generate a shared secret and set it as `SERVICE_TOKEN` in **both** `mic-mooi/.env` and
-   `mic-sessions/.env` (identical value, >= 32 bytes) — it guards the endpoints that hand a
-   third-party credential to `mic-sessions`:
+1. Generate `SERVICE_TOKEN` (>= 32 bytes) in the production environment file. Compose passes
+   the same value to both services to protect server-to-server credential exchange:
 
 ```bash
 openssl rand -base64 32
 ```
 
-2. Copy `mic-mooi/.env`'s `JWT_SECRET` into `mic-sessions/.env` as well: `mic-sessions` verifies
+2. Copy the same `JWT_SECRET` into both service environments: `mic-sessions` verifies
    access tokens locally with the same signing key, no network hop required for that check.
 3. Claude supports two credential modes, both stored the same way and both mapped to the same
    downstream env var (`CLAUDE_CODE_OAUTH_TOKEN`):
    - **Setup token** (works out of the box): the player runs `claude setup-token` and pastes the
      printed `sk-ant-oat…` token on the account screen.
    - **OAuth2 (PKCE)**: fully env-driven (`AGENT_CLAUDE_CLIENT_ID`, `AGENT_CLAUDE_AUTHORIZE_URI`,
-     `AGENT_CLAUDE_TOKEN_URI`, `AGENT_CLAUDE_SCOPES` in `mic-mooi/.env`) and ships **empty** on
+     `AGENT_CLAUDE_TOKEN_URI`, `AGENT_CLAUDE_SCOPES` in the production environment file) and ships **empty** on
      purpose: per the Claude Agent SDK docs, offering claude.ai login or its rate limits from a
      third-party product requires prior Anthropic approval. Fill these in only once that approval is
      in hand — until then, use the setup-token mode above.
@@ -128,13 +108,10 @@ openssl rand -base64 32
 
 ### Agent session runtime
 
-Run `mic-sessions` with one process and one worker. `make dev-start-mic-sessions` installs
-Python 3.13 and the pinned official Claude and Codex SDKs through uv, checks the Claude bundled CLI,
-then starts the service. Both SDKs include their CLI runtime; no global agent installation is required.
-Git and the host tools required by your repositories must be installed locally.
-
-Set `VITE_SESSIONS_BASE_URL` in `spa-mooi/.env` to `http://localhost:44913`.
-Configure `mic-sessions/.env` using its example:
+Run `mic-sessions` with one process and one worker. Its Dockerfile installs Python 3.13,
+the pinned official Claude and Codex SDKs, Git and the toolchains agents need. Both SDKs include
+their CLI runtime; no global agent installation is required. Compose wires the same-origin API URLs.
+Configure the service environment as needed:
 
 | Variable | Purpose |
 | --- | --- |
@@ -155,8 +132,7 @@ or creates a branch from the remote default branch. Sessions may use the same br
 independently. Closing, expiry and graceful shutdown stop the runtime before removing its clone.
 Session conversations are held in memory and cannot survive a service restart. Startup removes
 only marked session leftovers; legacy repositories and unowned directories are preserved.
-`dev-clean` preserves workspace storage; the next start reconciles owned leftovers, including
-when `WORKSPACE_ROOT` points outside the artifact directory.
+Keep workspace storage on a persistent volume; the next start reconciles owned leftovers.
 
 Messages accept up to 8 images (pick, paste or drop; PNG, JPEG, WebP, GIF; HEIC is converted in the
 browser). The SPA scales them to 2048 px and ≤ 3.5 MB; they are stored in `sessions/<UUID>/images`
@@ -196,7 +172,7 @@ Branch protection rules on the default branch still apply to the push.
 ### Session deployments
 
 Install Docker CLI with Compose v2 where `mic-sessions` runs and grant its service user access
-to the configured host Unix socket. Verify with `make dev-preflight-mic-sessions`.
+to the configured host Unix socket. Production Compose mounts this socket and supplies `DOCKER_GID`.
 Deploy builds and starts the root Docker Compose file of the session checkout. No container is ever
 published: the one web port (the web frontend's, or the only one of an API-only product) is reached
 only through the reverse proxy embedded in `mic-sessions`. Its build/up output
@@ -213,7 +189,7 @@ every session of the project.
 - **Manage**: ask the agent in any session (it reads and saves them through the platform), or use **Environment
   variables** (session actions menu) / the key icon on the project page (write-only in the browser).
 - **Use**: the Deploy preview's root Compose file reads them by interpolation (`${MOOI_DEVELOPMENT_NAME}`); production
-  deployments and backups inherit them. Server-wide fallbacks: `MOOI_DEVELOPMENT_*` in `mic-sessions/.env`
+  deployments and backups inherit them. Server-wide fallbacks: `MOOI_DEVELOPMENT_*` in the sessions container environment
   (agents only see their names).
 
 ### Production deployments
@@ -235,7 +211,7 @@ every session of the project.
   deploys a new release created from it.
 - **Environment**: set values under **Environment** (write-only in the browser; the chat agent can read and save
   them). Server-wide fallbacks: `MOOI_PRODUCTION_*` in
-  `mic-sessions/.env`. Install any SSH keys or CLIs the scripts need on the mic-sessions host.
+  the sessions container environment. Install any SSH keys or CLIs the scripts need on the mic-sessions host.
 - **Deploy**: choose an existing GitHub release or publish a new one from the default branch. `deploy.sh` runs from
   a detached checkout of that release; output streams to **Console**. The first successful deploy activates the
   draft. A failure is only reported; adjust it through the chat (**Adjust in chat** / **Fix with agent**).
@@ -264,7 +240,7 @@ successful production deployment: every backup belongs to the release running in
   deployment; `backup.sh`/`restore.sh` run from a checkout of the backup's release. Output streams to **Console**;
   each backup keeps every operation with its script and redacted output.
 - **Limits**: `BACKUP_TIMEOUT_SECONDS` (default 3600) per script; `MAX_DEPLOYMENTS` also caps concurrent backup
-  operations. Server-wide fallbacks: `MOOI_BACKUP_*` in `mic-sessions/.env`.
+  operations. Server-wide fallbacks: `MOOI_BACKUP_*` in the sessions container environment.
 
 ### Recipes
 
@@ -279,7 +255,7 @@ Reusable implementation recipes applied from a session chat. No configuration; n
 - **Reads**: recipes are read live from GitHub with the player's grant; files are cached by git blob hash. Limits: 200
   recipes per marketplace, 64 KB per file.
 
-Set these values in `mic-sessions/.env`:
+Set these values in the sessions container environment:
 
 | Variable | Purpose |
 | --- | --- |
@@ -316,7 +292,7 @@ Keep `WORKSPACE_ROOT` on durable, private, writable storage, including `deployme
 installation identity. Run one `mic-sessions` process/worker; multiworker/multinode coordination
 is unsupported. Stop preserves app data volumes; session closure/expiry and startup recovery
 remove only owned resources. Failed cleanup preserves manifests/checkouts for retry; restore
-Docker access and use `make dev-stop-mic-sessions` before cleaning the development environment.
+Docker access and stop the owning `mic-sessions` container gracefully before cleaning its environment.
 Do not delete deployment records manually while resources remain. Conversations do not survive
 restart. The default inactivity expiry is 180 minutes; a visible, focused Preview sends activity
 every 60 seconds. Hidden previews and automatic health checks do not prevent expiry.
@@ -324,15 +300,22 @@ every 60 seconds. Hidden previews and automatic health checks do not prevent exp
 Sessions run server-side, independent of any client: closing or suspending the browser never stops
 them, and any device reconnects to the live stream (replayed from the last seen event; a silent
 stream reconnects after `VITE_STREAM_STALE_SECONDS` or as soon as the app is visible again).
-Agent commands of plain sessions run Compose as `COMPOSE_PROJECT_NAME=mooi-session-<id>`, so a
-repository's own stack never recreates a host stack sharing its project name; agents are told to leave
-every other Docker resource alone.
+Agent commands of plain sessions run Compose as `COMPOSE_PROJECT_NAME=mooi-session-<installation>-<id>`,
+so a repository's own stack never recreates a host stack sharing its project name; agents are told to leave
+every other Docker resource alone and let the engine pick host ports. Deleting a session removes its
+Deploy preview and its own Compose project (containers, volumes, networks and built images); at boot,
+`mic-sessions` sweeps both kinds of leftovers of its own installation, never another one's.
 
 ### Previewing Mooi itself
 
 The root `compose.yml` is the preview stack of this repository (Postgres, `mic-mooi`, `mic-sessions`,
 `spa-mooi` under `MOOI_PREVIEW_BASE_PATH`), disjoint from production: own database, volumes, secrets,
 same-origin API routes and `mooi-preview` browser storage. No dictation and no nested deployments.
+Each session keeps its assigned `COMPOSE_PROJECT_NAME`; containers, networks and volumes use
+Compose-generated names. Postgres is private to the stack. Only the gateway declares a port,
+assigned by Docker for direct Compose use; managed Deploy publishes it only through the preview proxy.
+Each preview path also gets its own browser storage prefix, keeping authentication and preferences
+separate from production and other previews. Rebuilding a preview changes its path and storage prefix.
 
 | Development variable | Use |
 | --- | --- |
@@ -356,9 +339,8 @@ by `mic-speech` on `127.0.0.1`; no audio or text is stored or logged.
 
 - **Use**: tap / `Enter` on the microphone to toggle, hold it > 350 ms (release to finish), or hold `Ctrl+Shift+.`
   in the composer (release to finish). `Esc` while dictating discards and restores the text.
-- **Provisioning**: `make dev-start` downloads the pinned runtime for the platform (SHA-256 checked, into
-  `mic-speech/.runtime/`) and the model (~742 MB, first run only) into the runtime cache
-  (`~/Library/Caches/NeMoSpeech/models` on macOS). Apple Silicon uses Metal.
+- **Provisioning**: the production image includes the pinned, SHA-256-checked runtime. Its entrypoint
+  downloads the model (~742 MB, first run only) into the persistent speech data directory.
 - **Never written** if the composer is edited meanwhile, disabled or gone. One dictation per machine.
 - **Language** is forced (`SPEECH_LANGUAGE`, default `es-ES`): never detected nor translated.
 - **Metrics**: `GET http://127.0.0.1:59100/metrics` (counts and latencies only, 30-day retention, SQLite `0600`).
@@ -374,7 +356,7 @@ directory), served behind the host's Traefik (external `proxy` network, `cloudfl
 | --- | --- |
 | `https://<DOMAIN>` | `spa-mooi` nginx: SPA, `/api/mooi` → `mic-mooi`, `/api/sessions` → `mic-sessions`, `/api/stt` → `mic-speech`, `/preview` → `mic-sessions` preview proxy |
 
-- Project, containers and networks are `mooi-prod*`, disjoint from the dev stack (`deploy/development/compose.yml`, project `mooi`) and from session previews (root `compose.yml`).
+- Project, containers and networks are `mooi-prod*`, disjoint from the root `compose.yml` (development session previews).
 - `mic-speech` stays loopback-only: it shares the `spa-mooi` network namespace, nginx is its only client.
 - `mic-sessions` mounts the host Docker socket (`DOCKER_GID`), runs with `PREVIEW_UPSTREAM=network` on the
   external `mooi-previews` network and ships Git, Docker CLI + Compose/Buildx, Node, Bun, Python + uv,
@@ -411,129 +393,25 @@ rolls back to the previous release.
 Operate on the server from `<MOOI_DEPLOY_DIR>`:
 
 ```bash
-docker compose -p mooi-prod ps
+docker compose --env-file .env -f current/deploy/production/compose.prod.yml ps
 ```
-
-## Dev entrypoint
-
-The whole application in dev is driven only through the root `Makefile`. It starts, stops, inspects
-and cleans every artifact and every artifact dependency (Postgres, pgAdmin), in the right order,
-with health checks, logs and a status table. Never run a package manager, a build tool, docker or
-docker compose directly for these operations — use the targets below.
-
-```bash
-make            # same as `make help`
-```
-
-### Global commands
-
-| Command | Description |
-| --- | --- |
-| `make dev-start` | Start all dependencies and artifacts |
-| `make dev-stop` | Stop all artifacts and dependencies |
-| `make dev-restart` | Restart all dependencies and artifacts |
-| `make dev-status` | Show the state of the whole application |
-| `make dev-clean` | Stop everything and remove all dev state |
-
-### Scoped commands
-
-Every artifact gets the same set of commands, scoped to it and to what it needs:
-
-| Command | Description |
-| --- | --- |
-| `make dev-start-<artifact>` | Start `<artifact>` and its dependencies |
-| `make dev-stop-<artifact>` | Stop `<artifact>` only |
-| `make dev-restart-<artifact>` | Restart `<artifact>` and its dependencies |
-| `make dev-status-<artifact>` | Show the state of `<artifact>` |
-| `make dev-clean-<artifact>` | Stop `<artifact>` and remove its dev state |
-| `make dev-logs-<artifact>` | Tail the logs of `<artifact>` |
-
-Current artifacts: `spa-mooi`, `mic-mooi`, `mic-sessions` (e.g. `make dev-start-mic-mooi`).
-
-### Dev ports
-
-`make` pins every dev service to a fixed, uncommon port, hardcoded in `make/ports.mk` and
-exported so Vite, the microservice and docker compose all use it regardless of their `.env`
-values. The `.env` files carry the same numbers as a fallback for non-`make` usage.
-
-| Service | Port | URL |
-| --- | --- | --- |
-| `spa-mooi` | `28471` | `http://localhost:28471` |
-| `mic-mooi` | `39615` | `http://localhost:39615` |
-| `mic-sessions` | `44913` | `http://localhost:44913` |
-| `mic-speech` | `59100` | `http://127.0.0.1:59100` |
-| `postgres` | `54983` | `localhost:54983` |
-| `pgadmin` | `51247` | `http://localhost:51247` |
-
-Change a port in `make/ports.mk`; the cross-artifact wiring (`VITE_API_BASE_URL`, `CORS_ORIGIN`,
-`GITHUB_REDIRECT_URI`) follows automatically.
-
-### Support commands
-
-| Command | Description |
-| --- | --- |
-| `make dev-logs` | Tail all artifact logs |
-| `make dev-preflight-mic-sessions` | Verify deployment CLI, Compose and configured daemon |
-| `make help` | Show this help |
-
-### Flags
-
-| Flag | Effect |
-| --- | --- |
-| `V=1` | Verbose: trace every shell command instead of the normal output |
-| `YES=1` | Skip the confirmation prompt on `dev-clean` |
-| `STRICT=1` | `dev-status` exits non-zero when anything is not `RUNNING` |
-| `NO_COLOR=1` | Disable colored output |
-| `DEV_ASCII=1` | Use ASCII symbols instead of Unicode |
-
-### Runtime layout
-
-```
-.dev/run/<artifact>.pid   process id of a running artifact
-.dev/logs/<artifact>.log  stdout/stderr of a running artifact
-```
-
-Both are dev-only, git ignored, and fully removed by `make dev-clean`.
 
 ## Configuration
 
-### Data layer (root `.env`)
+### Root Compose (optional `.env`)
 
 | Variable | Description |
 | --- | --- |
-| `POSTGRES_DB` | Database name |
-| `POSTGRES_USER` | Database user |
-| `POSTGRES_PASSWORD` | Database password |
-| `POSTGRES_SCHEMA` | Database schema |
-| `POSTGRES_HOST` | Host reaching the engine |
-| `POSTGRES_PORT` | Engine port on the host |
-| `PGADMIN_EMAIL` | Console login email |
-| `PGADMIN_PASSWORD` | Console login password |
-| `PGADMIN_PORT` | Console port on the host |
+| `POSTGRES_DB` | Database name (default `mooi`) |
+| `POSTGRES_USER` | Database user (default `mooi`) |
+| `POSTGRES_PASSWORD` | Development database password (default `mooi-preview`) |
 
-### Dev entrypoint (root `.env`)
+### spa-mooi (Docker build arguments)
+
+All build arguments must be prefixed with `VITE_`.
 
 | Variable | Description |
 | --- | --- |
-| `DEV_HEALTH_TIMEOUT` | Seconds waiting for an artifact to become healthy |
-| `DEV_STOP_TIMEOUT` | Seconds before forcing a stop |
-| `DEV_SERVICE_TIMEOUT` | Seconds waiting for a compose service |
-| `DEV_POLL_INTERVAL` | Seconds between polls |
-| `DEV_LOG_LINES` | Lines shown by `dev-logs` |
-
-Open the pgAdmin console at `http://localhost:${PGADMIN_PORT}` and log in with `PGADMIN_EMAIL` /
-`PGADMIN_PASSWORD`. Register the server once with host `postgres`, port `5432`, and the
-`POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` values.
-
-### spa-mooi (`spa-mooi/.env`)
-
-All variables must be prefixed with `VITE_`.
-
-| Variable | Description |
-| --- | --- |
-| `VITE_DEV_HOST` | Dev server host |
-| `VITE_DEV_PORT` | Dev server port |
-| `VITE_PREVIEW_PORT` | Preview server port |
 | `VITE_APP_NAME` | Application name |
 | `VITE_APP_TAGLINE` | Headline tagline |
 | `VITE_APP_DESCRIPTION` | Meta and hero description |
@@ -551,11 +429,11 @@ All variables must be prefixed with `VITE_`.
 | `VITE_BASE_PATH` | Public path prefix (default `/`; previews: `MOOI_PREVIEW_BASE_PATH`) |
 | `VITE_STORAGE_PREFIX` | Local storage key prefix |
 
-### mic-mooi (`mic-mooi/.env`)
+### mic-mooi (container environment)
 
-Loaded by a dependency-free loader that also reads the root `.env`, so database variables are
-inherited and never duplicated. Precedence: real environment variables, then `mic-mooi/.env`, then
-the root `.env`.
+Compose supplies configuration through container environment variables. The production `.env` is
+used for Compose interpolation, not mounted into service containers. Artifact `.env.example` files
+list additional settings that can be added to the relevant Compose service environment.
 
 | Variable | Description |
 | --- | --- |
@@ -593,7 +471,7 @@ the root `.env`.
 | `LOG_LEVEL_AUTH` | Auth log level |
 | `LOG_LEVEL_GITHUB` | GitHub integration log level |
 
-### mic-speech (`mic-speech/.env`)
+### mic-speech (container environment)
 
 | Variable | Description |
 | --- | --- |

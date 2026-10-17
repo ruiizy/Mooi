@@ -106,11 +106,23 @@ public class AgentConnectionFeature {
         return agentConnectionService.rename(principal.player().id(), connectionId, request.name());
     }
 
-    @PutMapping("/admin/agents/connections/{connectionId}/models")
+    @GetMapping("/admin/agents/defaults")
     @Auth.RequireRole(Auth.Role.ADMIN)
-    public AgentConnectionPayload setDefaultModels(@PathVariable UUID connectionId,
-            @Valid @RequestBody DefaultModelsRequest request, Auth.Principal principal) {
-        return agentConnectionService.setDefaultModels(principal.player().id(), connectionId, request);
+    public List<EngineDefaultsPayload> engineDefaults() {
+        return agentConnectionService.engineDefaults();
+    }
+
+    @PutMapping("/me/agents/default-account")
+    @Auth.Authenticated
+    public AgentConnectionsResponse setDefaultAccount(@RequestBody DefaultAccountRequest request, Auth.Principal principal) {
+        return new AgentConnectionsResponse(agentConnectionService.setDefaultAccount(principal.player().id(), request.connectionId()));
+    }
+
+    @PutMapping("/admin/agents/{provider}/defaults")
+    @Auth.RequireRole(Auth.Role.ADMIN)
+    public EngineDefaultsPayload setDefaultModels(@PathVariable String provider,
+            @Valid @RequestBody DefaultModelsRequest request) {
+        return agentConnectionService.setDefaultModels(provider, request);
     }
 
     /** A browser holding a valid access token is not enough here: only another internal service may call this. */
@@ -154,6 +166,8 @@ public class AgentConnectionFeature {
     public static class AgentConnectionService {
 
         private final AgentConnectionRepository agentConnectionRepository;
+        private final EngineDefaultsRepository engineDefaultsRepository;
+        private final AccountPreferenceRepository accountPreferenceRepository;
         private final Agents.Settings settings;
         private final Agents.StateCodec stateCodec;
         private final Agents.OAuthClient oauthClient;
@@ -177,8 +191,9 @@ public class AgentConnectionFeature {
         }
 
         public List<AgentConnectionPayload> list(UUID playerId) {
+            UUID defaultId = defaultAccountId(playerId);
             return agentConnectionRepository.findByPlayerIdOrderByConnectedAtDesc(playerId).stream()
-                    .map(this::toPayload)
+                    .map(connection -> toPayload(connection, defaultId))
                     .toList();
         }
 
@@ -231,9 +246,10 @@ public class AgentConnectionFeature {
             if (Agents.Mode.fromWire(connection.getMode()) == Agents.Mode.OAUTH) {
                 connection = ensureFreshToken(connection, agentProvider);
             }
+            EngineDefaults defaults = engineDefaultsRepository.findById(agentProvider.id()).orElseThrow();
             return new CredentialPayload(agentProvider.id(), connection.getMode(),
                     secretBox.decrypt(connection.getAccessToken()), connection.getAccessTokenExpiresAt(),
-                    connection.getCredentialId(), connection.getSessionModel(), connection.getSessionEffort());
+                    connection.getCredentialId(), defaults.getSessionModel(), defaults.getSessionEffort());
         }
 
         /**
@@ -292,13 +308,37 @@ public class AgentConnectionFeature {
             return toPayload(agentConnectionRepository.save(connection));
         }
 
+        public List<EngineDefaultsPayload> engineDefaults() {
+            return engineDefaultsRepository.findAll().stream().map(this::toDefaultsPayload).toList();
+        }
+
         @Transactional
-        public AgentConnectionPayload setDefaultModels(UUID playerId, UUID connectionId, DefaultModelsRequest request) {
-            AgentConnection connection = agentConnectionRepository.findByPlayerIdAndId(playerId, connectionId)
-                    .orElseThrow(Agents.AgentsException::reauthorize);
-            connection.setSessionModel(cleanModel(request.sessionModel()));
-            connection.setSessionEffort(cleanEffort(request.sessionEffort()));
-            return toPayload(agentConnectionRepository.save(connection));
+        public EngineDefaultsPayload setDefaultModels(String provider, DefaultModelsRequest request) {
+            settings.find(provider).orElseThrow(Agents.AgentsException::unknownProvider);
+            EngineDefaults defaults = engineDefaultsRepository.findById(provider).orElseThrow();
+            defaults.setSessionModel(cleanModel(request.sessionModel()));
+            defaults.setSessionEffort(cleanEffort(request.sessionEffort()));
+            return toDefaultsPayload(engineDefaultsRepository.save(defaults));
+        }
+
+        @Transactional
+        public List<AgentConnectionPayload> setDefaultAccount(UUID playerId, UUID connectionId) {
+            if (connectionId == null) {
+                accountPreferenceRepository.deleteById(playerId);
+            } else {
+                agentConnectionRepository.findByPlayerIdAndId(playerId, connectionId)
+                        .orElseThrow(Agents.AgentsException::reauthorize);
+                accountPreferenceRepository.selectAccount(playerId, connectionId);
+            }
+            return list(playerId);
+        }
+
+        private UUID defaultAccountId(UUID playerId) {
+            return accountPreferenceRepository.findById(playerId).map(AccountPreference::getConnectionId).orElse(null);
+        }
+
+        private EngineDefaultsPayload toDefaultsPayload(EngineDefaults defaults) {
+            return new EngineDefaultsPayload(defaults.getProvider(), defaults.getSessionModel(), defaults.getSessionEffort());
         }
 
         private String cleanEffort(String value) {
@@ -395,13 +435,16 @@ public class AgentConnectionFeature {
         }
 
         private AgentConnectionPayload toPayload(AgentConnection connection) {
+            return toPayload(connection, defaultAccountId(connection.getPlayerId()));
+        }
+
+        private AgentConnectionPayload toPayload(AgentConnection connection, UUID defaultId) {
             String label = settings.find(connection.getProvider())
                     .map(Agents.Provider::label)
                     .orElse(connection.getProvider());
             return new AgentConnectionPayload(connection.getId(), connection.getProvider(), label, connection.getName(), connection.getMode(),
                     connection.getAccountLabel(), connection.getScope(), connection.getConnectedAt(),
-                    connection.getAccessTokenExpiresAt(), connection.isStale(), connection.getSessionModel(),
-                    connection.getSessionEffort());
+                    connection.getAccessTokenExpiresAt(), connection.isStale(), connection.getId().equals(defaultId));
         }
     }
 
@@ -438,12 +481,6 @@ public class AgentConnectionFeature {
         @Column(name = "name", length = 100)
         private String name;
 
-        @Column(name = "session_model", length = 120)
-        private String sessionModel;
-
-        @Column(name = "session_effort", length = 32)
-        private String sessionEffort;
-
         /**
          * AES-256-GCM ciphertext produced by {@code Crypto.SecretBox}, never a usable credential.
          * The plaintext exists only inside the request that needs it.
@@ -474,6 +511,42 @@ public class AgentConnectionFeature {
         private OffsetDateTime connectedAt;
     }
 
+    @Getter
+    @Setter
+    @NoArgsConstructor
+    @Entity(name = "EngineDefaults")
+    @Table(name = "agent_engine_defaults")
+    public static class EngineDefaults {
+        @Id
+        @Column(length = 32)
+        private String provider;
+        @Column(name = "session_model", length = 120)
+        private String sessionModel;
+        @Column(name = "session_effort", length = 32)
+        private String sessionEffort;
+    }
+
+    public interface EngineDefaultsRepository extends JpaRepository<EngineDefaults, String> { }
+
+    @Getter
+    @NoArgsConstructor
+    @Entity(name = "AccountPreference")
+    @Table(name = "agent_account_preferences")
+    public static class AccountPreference {
+        @Id
+        @Column(name = "player_id")
+        private UUID playerId;
+        @Column(name = "connection_id")
+        private UUID connectionId;
+    }
+
+    public interface AccountPreferenceRepository extends JpaRepository<AccountPreference, UUID> {
+        @Modifying
+        @Query(value = "insert into agent_account_preferences (player_id, connection_id) values (:playerId, :connectionId) "
+                + "on conflict (player_id) do update set connection_id = excluded.connection_id", nativeQuery = true)
+        void selectAccount(UUID playerId, UUID connectionId);
+    }
+
     public interface AgentConnectionRepository extends JpaRepository<AgentConnection, UUID> {
 
         List<AgentConnection> findByPlayerIdOrderByConnectedAtDesc(UUID playerId);
@@ -498,7 +571,7 @@ public class AgentConnectionFeature {
      */
     public record AgentConnectionPayload(UUID id, String provider, String label, String name, String mode, String accountLabel,
                                          String scope, OffsetDateTime connectedAt, OffsetDateTime expiresAt,
-                                         boolean stale, String sessionModel, String sessionEffort) {
+                                         boolean stale, boolean defaultAccount) {
     }
 
     /** Where the browser sends the player to authorize. Nothing else is needed to complete the callback. */
@@ -536,6 +609,10 @@ public class AgentConnectionFeature {
 
     public record RenameRequest(@NotBlank String name) {
     }
+
+    public record DefaultAccountRequest(UUID connectionId) { }
+
+    public record EngineDefaultsPayload(String provider, String sessionModel, String sessionEffort) { }
 
     public record DefaultModelsRequest(String sessionModel, String sessionEffort) {
     }

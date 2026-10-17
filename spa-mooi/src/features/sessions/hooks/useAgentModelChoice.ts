@@ -56,9 +56,12 @@ export const useAgentModelChoice = (open: boolean, connections: AgentConnection[
   }, [selectedProvider]);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      setConnectionId('');
+      return;
+    }
     setConnectionId((current) => (current && connections.some((connection) => connection.id === current)
-      ? current : connections[0]?.id ?? ''));
+      ? current : connections.find((connection) => connection.defaultAccount)?.id ?? connections[0]?.id ?? ''));
   }, [open, connections]);
 
   const selectModel = (value: string) => {

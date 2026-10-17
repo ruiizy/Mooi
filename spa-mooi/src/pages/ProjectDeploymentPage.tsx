@@ -188,7 +188,7 @@ export const ProjectDeploymentPage = () => {
 
         {tab === 'changes' && chat ? <Suspense fallback={<p className="p-6 text-sm text-ink-muted">Loading changes…</p>}>
           <ChangesPanel sessionId={chat.id} showMerge={false}
-            emptyDescription={`Repository changes appear here only when the deployment needs them. The agent asks before committing them to ${project.defaultBranch}.`} />
+            emptyDescription={`Production Compose and other repository changes appear here. The agent asks before committing them to ${project.defaultBranch}.`} />
         </Suspense> : null}
       </div>
 

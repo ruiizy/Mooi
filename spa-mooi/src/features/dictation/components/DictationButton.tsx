@@ -1,7 +1,7 @@
 import { useEffect, type RefObject } from 'react';
 import { Loader2, Mic, MicOff } from 'lucide-react';
 import { DictationBars } from '@/features/dictation/components/DictationBars';
-import { useDictation } from '@/features/dictation/hooks/useDictation';
+import type { DictationController } from '@/features/dictation/types/DictationController';
 import { useDictationHotkey } from '@/features/dictation/hooks/useDictationHotkey';
 import { useDictationPointer } from '@/features/dictation/hooks/useDictationPointer';
 import { DICTATION_STATE_LABELS } from '@/features/dictation/lib/dictationCopy';
@@ -11,6 +11,7 @@ import { cn } from '@/shared/utils/cn';
 interface DictationButtonProps {
   /** The field the transcript is written into, at its cursor. */
   field: RefObject<DictationField | null>;
+  dictation: DictationController;
   disabled?: boolean;
   className?: string;
 }
@@ -27,16 +28,15 @@ const tones = {
  * Ctrl+Shift+. while the field has focus. The words appear directly in the field as they are
  * recognized; there is no separate preview.
  */
-export const DictationButton = ({ field, disabled = false, className }: DictationButtonProps) => {
-  const dictation = useDictation(field);
+export const DictationButton = ({ field, dictation, disabled = false, className }: DictationButtonProps) => {
   const handlers = useDictationPointer(dictation);
   useDictationHotkey(field, dictation);
-  const { state, error, isActive, cancel } = dictation;
+  const { state, error, isActive, finish } = dictation;
   const label = error ?? DICTATION_STATE_LABELS[state];
 
   useEffect(() => {
-    if (disabled && isActive()) cancel();
-  }, [cancel, disabled, isActive]);
+    if (disabled && isActive()) finish();
+  }, [finish, disabled, isActive]);
 
   return (
     <span className="relative inline-flex shrink-0">

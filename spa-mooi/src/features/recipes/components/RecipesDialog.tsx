@@ -75,14 +75,14 @@ export const RecipesDialog = ({ onClose, initialMarketplaceId, onApply, applyDis
           </button>
         </div>
 
-        <div className="grid h-[min(62dvh,36rem)] min-h-0 grid-cols-1 gap-4 md:grid-cols-[minmax(0,19rem)_minmax(0,1fr)]">
-          <nav aria-label="Recipes" className={cn('min-h-0 overflow-y-auto overscroll-contain rounded-xl border border-line', selected && 'hidden md:block')}>
+        <div className="grid grid-cols-1 gap-4 lg:h-[min(62dvh,36rem)] lg:min-h-0 lg:grid-cols-[minmax(0,19rem)_minmax(0,1fr)]">
+          <nav aria-label="Recipes" className={cn('rounded-xl border border-line lg:min-h-0 lg:overflow-y-auto lg:overscroll-contain', selected && 'hidden lg:block')}>
             <RecipeList state={state} recipes={visible} selectedSlug={selectedSlug} onSelect={setSelectedSlug} onRetry={state.reload}
               emptyHint={`No recipes yet. Add Markdown files to the recipes folder of ${marketplace?.fullName ?? 'this repository'}.`} />
           </nav>
 
-          <section aria-label="Recipe preview" className={cn('flex min-h-0 flex-col gap-3', !selected && 'hidden md:flex')}>
-            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+          <section aria-label="Recipe preview" className={cn('flex flex-col gap-3 lg:min-h-0', !selected && 'hidden lg:flex')}>
+            <div className="lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:overscroll-contain">
               <RecipePreview recipe={selected} onBack={() => setSelectedSlug(null)} />
             </div>
             {onApply && selected ? (

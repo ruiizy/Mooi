@@ -80,7 +80,17 @@ export const useDictation = (field: RefObject<DictationField | null>): Dictation
     void current.start();
   }, [end, field, setState]);
 
-  const stop = useCallback(() => session.current?.stop(), []);
+  const finish = useCallback(() => {
+    session.current?.dispose();
+    end();
+    setError(null);
+  }, [end]);
+
+  const stop = useCallback(() => {
+    // Connecting has no audio to finalize; do not wait for permission or the server.
+    if (stateRef.current === 'connecting') finish();
+    else session.current?.stop();
+  }, [finish]);
 
   const resumeAudio = useCallback(() => session.current?.resumeAudio(), []);
 
@@ -115,5 +125,5 @@ export const useDictation = (field: RefObject<DictationField | null>): Dictation
     transcript.current?.rollback();
   }, []);
 
-  return { state, error, isActive, start, stop, cancel, resumeAudio };
+  return { state, error, isActive, start, stop, cancel, finish, resumeAudio };
 };

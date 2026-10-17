@@ -1,0 +1,24 @@
+databaseChangeLog:
+  - changeSet:
+      id: 029-agent-engine-defaults
+      author: mooi
+      changes:
+        - sql:
+            sql: |
+              CREATE TABLE agent_engine_defaults (
+                provider varchar(32) PRIMARY KEY,
+                session_model varchar(120),
+                session_effort varchar(32)
+              );
+              INSERT INTO agent_engine_defaults (provider, session_model, session_effort)
+              SELECT DISTINCT ON (provider) provider, session_model, session_effort
+              FROM agent_connections
+              WHERE session_model IS NOT NULL OR session_effort IS NOT NULL
+              ORDER BY provider, updated_at DESC, id;
+              INSERT INTO agent_engine_defaults (provider) VALUES ('claude'), ('codex') ON CONFLICT DO NOTHING;
+              CREATE TABLE agent_account_preferences (
+                player_id uuid PRIMARY KEY REFERENCES players(id) ON DELETE CASCADE,
+                connection_id uuid REFERENCES agent_connections(id) ON DELETE SET NULL
+              );
+              CREATE INDEX ix_agent_account_preferences_connection ON agent_account_preferences(connection_id);
+              ALTER TABLE agent_connections DROP COLUMN session_model, DROP COLUMN session_effort;

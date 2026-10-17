@@ -38,6 +38,6 @@ Before stopping when you finished the preivous task you must say how is the cogn
 
 Before starting the `PLAN.md` implementation you must ask to the user about implementing the plan
 
-**Makefile Support**
+**Compose Support**
 
-If an artifact is created, deleted or modified and the change affects how it runs in dev, you must update the `Makefile` support in the same change, so `make dev-start`, `make dev-stop`, `make dev-status` and `make dev-clean` keep working for the whole application and for each artifact
+If an artifact change affects deployment, update root `compose.yml` for development sessions and `deploy/production/compose.prod.yml` for production as needed. Preserve session isolation: assigned Compose project, generated resource names and host ports, and no operations on another session's resources. Do not restart or deploy automatically after code changes.

@@ -4,6 +4,7 @@ import {
   disconnectAgent,
   fetchAgentConnections,
   renameAgentConnection,
+  selectDefaultAccount,
   startAgentAuthorization,
 } from '@/features/agents/api/agentsApi';
 import type { AgentConnection } from '@/features/agents/types/AgentConnection';
@@ -22,6 +23,7 @@ interface UseAgentConnections {
   connectToken: (provider: string, token: string, name: string) => Promise<boolean>;
   disconnect: (id: string) => Promise<boolean>;
   rename: (id: string, name: string) => Promise<boolean>;
+  setDefaultAccount: (id: string | null) => Promise<boolean>;
   reload: () => void;
   clearActionError: () => void;
 }
@@ -112,6 +114,20 @@ export const useAgentConnections = (): UseAgentConnections => {
     }
   }, []);
 
+  const setDefaultAccount = useCallback(async (id: string | null): Promise<boolean> => {
+    setBusy(true);
+    setActionError(null);
+    try {
+      useAgentsStore.getState().setConnections(await selectDefaultAccount(id));
+      return true;
+    } catch (failure) {
+      setActionError((failure as Error).message);
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
   const reload = useCallback(() => {
     useAgentsStore.getState().setStatus('loading');
     fetchAgentConnections()
@@ -136,6 +152,7 @@ export const useAgentConnections = (): UseAgentConnections => {
     connectToken,
     disconnect,
     rename,
+    setDefaultAccount,
     reload,
     clearActionError,
   };

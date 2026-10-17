@@ -1,11 +1,12 @@
-# Mooi session preview stack: what Mooi's Deploy button builds from a session checkout, never production
-# (deploy/production/compose.prod.yml) nor the local dev data layer (deploy/development/compose.yml).
+# Mooi development session stack; production uses deploy/production/compose.prod.yml.
+# The Deploy button builds and runs every service from the session checkout. Session agents use
+# their assigned COMPOSE_PROJECT_NAME; resource names and host ports are generated per project.
 #
 #   /preview/<id>/  -> spa-mooi nginx: SPA + /api/mooi -> mic-mooi + /api/sessions -> mic-sessions
 #
 # Fully disjoint from production: own database, volumes, secrets (MOOI_DEVELOPMENT_*), browser storage
 # prefix and same-origin API routes under MOOI_PREVIEW_BASE_PATH. Mooi renames the project, volumes,
-# networks and images per session and drops every published port. Google sign-in is mocked unless
+# networks and images per session and drops every published port but the SPA one. Google sign-in is mocked unless
 # MOOI_DEVELOPMENT_GOOGLE_AUTH_MOCK=false; GitHub, Claude and Codex accounts are linked from MOOI_DEVELOPMENT_*.
 # Left out: dictation (mic-speech, a ~742 MB local model) and nested deployments (no Docker engine inside).
 
@@ -13,14 +14,14 @@ services:
   postgres:
     image: postgres:18-alpine
     environment:
-      POSTGRES_DB: mooi
-      POSTGRES_USER: mooi
-      POSTGRES_PASSWORD: mooi-preview
+      POSTGRES_DB: ${POSTGRES_DB:-mooi}
+      POSTGRES_USER: ${POSTGRES_USER:-mooi}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mooi-preview}
       PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U mooi -d mooi"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${POSTGRES_USER:-mooi} -d ${POSTGRES_DB:-mooi}"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -33,9 +34,9 @@ services:
       SERVER_PORT: "8080"
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
-      POSTGRES_DB: mooi
-      POSTGRES_USER: mooi
-      POSTGRES_PASSWORD: mooi-preview
+      POSTGRES_DB: ${POSTGRES_DB:-mooi}
+      POSTGRES_USER: ${POSTGRES_USER:-mooi}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mooi-preview}
       POSTGRES_SCHEMA: public
       CORS_ORIGIN: ${MOOI_DEVELOPMENT_PUBLIC_ORIGIN:?set MOOI_DEVELOPMENT_PUBLIC_ORIGIN}
       SECRETS_KEY: ${MOOI_DEVELOPMENT_SECRETS_KEY:?set MOOI_DEVELOPMENT_SECRETS_KEY}
@@ -94,9 +95,9 @@ services:
         VITE_GOOGLE_CLIENT_ID: ${MOOI_DEVELOPMENT_GOOGLE_CLIENT_ID}
         VITE_AUTH_GOOGLE_MOCK: ${MOOI_DEVELOPMENT_GOOGLE_AUTH_MOCK:-true}
         # Previews share Mooi's origin: never read or overwrite production's browser storage.
-        VITE_STORAGE_PREFIX: mooi-preview
+        VITE_STORAGE_PREFIX: mooi-preview${MOOI_PREVIEW_BASE_PATH:-/}
     ports:
-      - "28480:80"
+      - "80"
     depends_on:
       - mic-mooi
       - mic-sessions

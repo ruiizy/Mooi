@@ -8,6 +8,8 @@ export interface DictationController {
   start: () => void;
   stop: () => void;
   cancel: () => void;
+  /** Releases the microphone immediately, keeping the text already written in the field. */
+  finish: () => void;
   /** Lets the audio engine run; called from a real user activation (touch `pointerdown` is not one). */
   resumeAudio: () => void;
 }

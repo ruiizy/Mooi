@@ -6,6 +6,7 @@ export const DICTATION_MESSAGES = {
   microphoneDenied: 'Microphone access is blocked. Allow it in the browser or app settings.',
   microphoneMissing: 'No microphone was found on this device.',
   microphoneBusy: 'The microphone is in use by another app. Close it and try again.',
+  audioNoSignal: 'The microphone is not delivering audio. Check that it is not muted and tap it again.',
   audioBlocked: 'The microphone could not start. Tap it again.',
   microphoneDisconnected: 'The microphone was disconnected.',
   connectTimeout: 'The dictation service is not responding.',

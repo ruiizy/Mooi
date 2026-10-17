@@ -25,7 +25,7 @@ export const RecipePreview = ({ recipe, onBack }: RecipePreviewProps) => {
   return (
     <article className="flex flex-col gap-4">
       <header className="flex items-start gap-3">
-        <button type="button" onClick={onBack} aria-label="Back to recipes" title="Back to recipes" className={`${iconAction} md:hidden`}>
+        <button type="button" onClick={onBack} aria-label="Back to recipes" title="Back to recipes" className={`${iconAction} lg:hidden`}>
           <ChevronLeft className="size-4" />
         </button>
         <div className="min-w-0 flex-1">

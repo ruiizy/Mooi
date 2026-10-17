@@ -1,3 +1,4 @@
+import type { EngineDefaults } from '@/features/agents/types/EngineDefaults';
 import { authenticatedFetch } from '@/features/auth/lib/authenticatedFetch';
 import type { AgentAuthorizationResponse } from '@/features/agents/types/AgentAuthorizationResponse';
 import type { AgentConnection } from '@/features/agents/types/AgentConnection';
@@ -101,12 +102,24 @@ export const renameAgentConnection = async (id: string, name: string): Promise<A
   return (await response.json()) as AgentConnection;
 };
 
-export const saveAgentDefaultModels = async (id: string, sessionModel: string | null,
-  sessionEffort: string | null): Promise<AgentConnection> => {
-  const response = await authenticatedFetch(`/admin/agents/connections/${encodeURIComponent(id)}/models`, {
-    method: 'PUT', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sessionModel, sessionEffort }),
+export const fetchEngineDefaults = async (): Promise<EngineDefaults[]> => {
+  const response = await authenticatedFetch('/admin/agents/defaults');
+  if (!response.ok) throw new Error(await apiErrorMessage(response, 'Could not load engine defaults.'));
+  return response.json();
+};
+
+export const saveEngineDefaults = async (defaults: EngineDefaults): Promise<EngineDefaults> => {
+  const response = await authenticatedFetch(`/admin/agents/${encodeURIComponent(defaults.provider)}/defaults`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(defaults),
   });
-  if (!response.ok) throw new Error(await apiErrorMessage(response, 'Could not save model defaults.'));
-  return (await response.json()) as AgentConnection;
+  if (!response.ok) throw new Error(await apiErrorMessage(response, 'Could not save engine defaults.'));
+  return response.json();
+};
+
+export const selectDefaultAccount = async (connectionId: string | null): Promise<AgentConnection[]> => {
+  const response = await authenticatedFetch('/me/agents/default-account', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ connectionId }),
+  });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, 'Could not change your default account.'));
+  return ((await response.json()) as AgentConnectionsResponse).connections;
 };

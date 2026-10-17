@@ -1,10 +1,11 @@
+import { DictationAudioHealth } from '@/features/dictation/lib/DictationAudioHealth';
 import { DICTATION_MESSAGES } from '@/features/dictation/lib/dictationMessages';
 import { dictationStreamUrl } from '@/features/dictation/lib/dictationStreamUrl';
 import type { DictationCallbacks } from '@/features/dictation/types/DictationCallbacks';
 import type { DictationServerMessage } from '@/features/dictation/types/DictationServerMessage';
 import { microphoneErrorMessage } from '@/features/dictation/lib/microphoneErrorMessage';
-import { setAudioSessionType } from '@/features/dictation/lib/audioSession';
-import { acquireDictationAudio, discardDictationAudio, releaseDictationAudio } from '@/features/dictation/lib/dictationAudio';
+import { acquireAudioSession } from '@/features/dictation/lib/audioSession';
+import { acquireDictationAudio, discardDictationAudio, releaseDictationAudio, restartDictationAudio, resumeDictationAudio } from '@/features/dictation/lib/dictationAudio';
 
 const CONNECT_TIMEOUT_MS = 15_000;
 const FINALIZE_TIMEOUT_MS = 30_000;
@@ -19,8 +20,8 @@ const MAX_BUFFERED_BYTES = 128_000;
  * gesture, before any server session exists. Every exit path releases every resource, and once
  * disposed no callback fires again. Audio start is bounded in time, so a browser that never lets
  * the audio run (iOS audio interruption, missing user activation) ends in an error, never a hang.
- * The audio engine is shared across dictations (see `dictationAudio`); an audio failure or a
- * silent result discards it, so the next dictation recovers without reloading the page.
+ * The engine is shared across chats. Missing audio gets one bounded recovery attempt;
+ * an empty transcript alone never discards a healthy engine.
  */
 export class DictationSession {
   private readonly callbacks: DictationCallbacks;
@@ -34,6 +35,14 @@ export class DictationSession {
   private node: AudioWorkletNode | null = null;
   private socket: WebSocket | null = null;
   private timer: number | undefined;
+  private flushTimer: number | undefined;
+  private recoveryTimer: number | undefined;
+  private recovering = false;
+  private releaseAudioSession: (() => void) | null = null;
+  private readonly health = new DictationAudioHealth(
+    () => this.recoverCapture(),
+    () => this.failAudio(DICTATION_MESSAGES.audioNoSignal),
+  );
 
   constructor(callbacks: DictationCallbacks) {
     this.callbacks = callbacks;
@@ -44,7 +53,9 @@ export class DictationSession {
       this.fail(DICTATION_MESSAGES.insecureContext);
       return;
     }
-    setAudioSessionType('play-and-record');
+    this.releaseAudioSession = acquireAudioSession();
+    resumeDictationAudio();
+    this.arm(CONNECT_TIMEOUT_MS, DICTATION_MESSAGES.audioBlocked);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
@@ -58,7 +69,7 @@ export class DictationSession {
       this.fail(microphoneErrorMessage(error));
       return;
     }
-    this.stream.getAudioTracks().forEach((track) => track.addEventListener('ended', () => this.fail(DICTATION_MESSAGES.microphoneDisconnected)));
+    this.watchTracks(this.stream);
 
     let context: AudioContext;
     try {
@@ -89,18 +100,28 @@ export class DictationSession {
    * Touch `pointerdown` is not an activation, so the engine may still be waiting for one.
    */
   resumeAudio(): void {
-    if (this.closed || !this.context || this.context.state === 'running') return;
-    void this.context.resume().catch(() => undefined);
+    if (this.closed || this.stopping) return;
+    if (this.context) void this.context.resume().catch(() => undefined);
+    else resumeDictationAudio();
   }
 
-  /** Idempotent. Before `ready` it is deferred; after, the worklet flushes its tail frame first. */
+  /** Releases capture synchronously; the worklet then flushes audio already buffered. */
   stop(): void {
     if (this.closed || this.stopping) return;
     this.stopping = true;
-    if (!this.ready) return;
+    this.health.stop();
+    window.clearTimeout(this.recoveryTimer);
+    this.stopTracks();
+    if (!this.ready) {
+      this.dispose();
+      this.callbacks.onFinal('');
+      return;
+    }
     this.callbacks.onStopping();
     this.arm(FINALIZE_TIMEOUT_MS, DICTATION_MESSAGES.finalizeTimeout);
     this.node?.port.postMessage('stop');
+    // iOS can interrupt the worklet when capture stops: finalization must still proceed.
+    this.flushTimer = window.setTimeout(() => this.finishCapture(), 250);
   }
 
   dispose(): void {
@@ -108,28 +129,21 @@ export class DictationSession {
     this.closed = true;
     window.clearTimeout(this.timer);
     this.stopTracks();
-    this.source?.disconnect();
-    if (this.node) {
-      this.node.port.onmessage = null;
-      this.node.port.close();
-      this.node.disconnect();
-    }
-    if (this.context) {
-      this.context.removeEventListener('statechange', this.onAudioStateChange);
-      if (this.audioFailed) discardDictationAudio(this.context);
-      else releaseDictationAudio(this.context);
-    }
+    window.clearTimeout(this.flushTimer);
+    window.clearTimeout(this.recoveryTimer);
+    this.health.stop();
+    this.releaseCapture();
     if (this.socket && this.socket.readyState < WebSocket.CLOSING) this.socket.close();
   }
 
-  private async startAudio(context: AudioContext): Promise<void> {
-    if (context.state === 'running') return;
+  private async startAudio(context: AudioContext, restart = false): Promise<void> {
+    if (!restart && context.state === 'running') return;
     let timer: number | undefined;
     const timeout = new Promise<never>((_, reject) => {
       timer = window.setTimeout(() => reject(new Error('audio start timeout')), AUDIO_START_TIMEOUT_MS);
     });
     try {
-      await Promise.race([context.resume(), timeout]);
+      await Promise.race([restart ? restartDictationAudio(context, () => !this.closed && !this.stopping) : context.resume(), timeout]);
     } finally {
       window.clearTimeout(timer);
     }
@@ -139,7 +153,7 @@ export class DictationSession {
   /** A phone call, Siri or another app takes the audio away (`interrupted` on iOS): recover or end. */
   private readonly onAudioStateChange = (): void => {
     const context = this.context;
-    if (this.closed || !context || context.state === 'running') return;
+    if (this.closed || this.stopping || this.recovering || !context || context.state === 'running') return;
     if (context.state === 'closed') {
       this.failAudio(DICTATION_MESSAGES.microphoneDisconnected);
       return;
@@ -173,8 +187,7 @@ export class DictationSession {
         this.callbacks.onPartial(message.text);
         return;
       case 'final':
-        // Nothing heard: the engine may be feeding silence, so the next dictation gets a fresh one.
-        this.audioFailed = !message.text;
+        // No recognized speech does not imply a broken audio engine.
         this.dispose();
         this.callbacks.onFinal(message.text);
         return;
@@ -207,11 +220,7 @@ export class DictationSession {
     }
     this.ready = true;
     this.callbacks.onReady();
-    if (this.stopping) {
-      this.stopping = false;
-      this.stop();
-      return;
-    }
+    this.health.start();
     this.timer = window.setTimeout(() => this.stop(), maxSeconds * 1000);
   }
 
@@ -219,17 +228,75 @@ export class DictationSession {
     const socket = this.socket;
     if (this.closed || !socket) return;
     if (data === 'stopped') {
-      this.source?.disconnect();
-      this.stopTracks();
-      if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'stop' }));
+      this.finishCapture();
       return;
     }
     if (!(data instanceof ArrayBuffer) || socket.readyState !== WebSocket.OPEN) return;
+    if (!this.stopping) this.health.frame(data);
     if (socket.bufferedAmount > MAX_BUFFERED_BYTES) {
       this.fail(DICTATION_MESSAGES.backpressure);
       return;
     }
     socket.send(data);
+  }
+
+  private watchTracks(stream: MediaStream): void {
+    stream.getAudioTracks().forEach((track) => track.addEventListener('ended', () => {
+      if (this.stream === stream && !this.stopping) this.fail(DICTATION_MESSAGES.microphoneDisconnected);
+    }));
+  }
+
+  private async recoverCapture(): Promise<void> {
+    const context = this.context;
+    if (this.closed || this.stopping || !context) return;
+    this.recovering = true;
+    this.recoveryTimer = window.setTimeout(() => this.failAudio(DICTATION_MESSAGES.audioNoSignal), AUDIO_START_TIMEOUT_MS);
+    try {
+      this.source?.disconnect();
+      this.stopTracks();
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+      });
+      if (this.closed || this.stopping) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      this.stream = stream;
+      this.watchTracks(stream);
+      await this.startAudio(context, true);
+      if (this.closed || this.stopping || !this.node) return;
+      this.source = context.createMediaStreamSource(stream);
+      this.source.connect(this.node);
+    } finally {
+      window.clearTimeout(this.recoveryTimer);
+      this.recovering = false;
+    }
+  }
+
+  private finishCapture(): void {
+    if (this.closed || !this.context) return;
+    window.clearTimeout(this.flushTimer);
+    this.releaseCapture();
+    if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify({ type: 'stop' }));
+  }
+
+  private releaseCapture(): void {
+    this.source?.disconnect();
+    if (this.node) {
+      this.node.port.onmessage = null;
+      this.node.port.close();
+      this.node.disconnect();
+    }
+    if (this.context) {
+      this.context.removeEventListener('statechange', this.onAudioStateChange);
+      if (this.audioFailed) discardDictationAudio(this.context);
+      else releaseDictationAudio(this.context);
+    }
+    this.source = null;
+    this.node = null;
+    this.context = null;
+    this.releaseAudioSession?.();
+    this.releaseAudioSession = null;
   }
 
   private arm(delay: number, message: string): void {
@@ -239,6 +306,7 @@ export class DictationSession {
 
   private stopTracks(): void {
     this.stream?.getTracks().forEach((track) => track.stop());
+    this.stream = null;
   }
 
   private failAudio(message: string): void {
