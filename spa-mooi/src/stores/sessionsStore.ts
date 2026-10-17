@@ -31,17 +31,22 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
   setSessions: (sessions) => set((state) => ({ sessions: sessions.map((session) =>
     mergeSession(state.sessions.find((current) => current.id === session.id), session)) })),
 
-  syncSessions: (sessions, projectId) => set((state) => {
+  // A session created while the list was in flight is missing from it but must survive, live
+  // transcript included: only sessions the store already held at request time can be dropped.
+  syncSessions: (sessions, projectId, knownIds) => set((state) => {
     const inScope = (session: Session) => !projectId || session.projectId === projectId;
     const incomingIds = new Set(sessions.map((session) => session.id));
-    const removed = state.sessions.filter((session) => inScope(session) && !incomingIds.has(session.id));
+    const removed = state.sessions.filter((session) => inScope(session) && !incomingIds.has(session.id)
+      && (!knownIds || knownIds.has(session.id)));
+    const removedIds = new Set(removed.map((session) => session.id));
     const byId = { ...state.byId };
     removed.forEach((session) => delete byId[session.id]);
     return {
       byId,
       sessions: [
         ...sessions.map((session) => mergeSession(state.sessions.find((current) => current.id === session.id), session)),
-        ...state.sessions.filter((session) => !inScope(session)),
+        ...state.sessions.filter((session) => !inScope(session)
+          || (!incomingIds.has(session.id) && !removedIds.has(session.id))),
       ],
     };
   }),

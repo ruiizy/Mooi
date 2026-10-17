@@ -4,6 +4,7 @@ import { useAgentConnectionsSync } from '@/features/agents/hooks/useAgentConnect
 import { useGithubConnectionSync } from '@/features/github/hooks/useGithubConnectionSync';
 import { useProjectsSync } from '@/features/projects/hooks/useProjectsSync';
 import { useRecipeMarketplacesSync } from '@/features/recipes/hooks/useRecipeMarketplacesSync';
+import { useAllSessionsSync } from '@/features/sessions/hooks/useAllSessionsSync';
 import { AppMobileDrawer } from '@/layouts/app/AppMobileDrawer';
 import { AppSidebar } from '@/layouts/app/AppSidebar';
 import { AppTopBar } from '@/layouts/app/AppTopBar';
@@ -14,6 +15,7 @@ export const AppLayout = () => {
   useProjectsSync();
   useAgentConnectionsSync();
   useRecipeMarketplacesSync();
+  useAllSessionsSync();
   const main = useRef<HTMLElement>(null);
   useScrollTopOnNavigate(main);
 
