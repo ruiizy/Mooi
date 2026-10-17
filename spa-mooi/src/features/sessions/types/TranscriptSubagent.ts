@@ -23,6 +23,9 @@ export interface TranscriptSubagent {
   lastToolName: string | null;
   usage: SubagentUsage | null;
   result: string | null;
+  /** Where `result` came from, most trusted first: the agent's own report, the delegating call's
+   * result, or the provider's short completion summary. A weaker source never replaces a stronger. */
+  resultSource: 'report' | 'call' | 'summary' | null;
   /** The agent's own text, reasoning, tool steps and nested delegations, in order. */
   blocks: TranscriptBlock[];
 }

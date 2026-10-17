@@ -114,6 +114,11 @@ const withBlocks = (
   status: subagent.status === 'started' ? 'working' : subagent.status, blocks: update(subagent.blocks) })) : null)
   ?? withOpenTurn(entries, seq, at, update);
 
+const requestOwner = (parent: string | null, background: unknown) => ({
+  ...(parent ? { parentToolUseId: parent } : {}),
+  ...(background === true ? { background: true } : {}),
+});
+
 /** Text the platform adds to the open turn (requests, answers, provider notices). */
 const withRequestText = (entries: TranscriptEntry[], seq: number, at: string, id: string, text: string, mode: 'append' | 'replace') =>
   withOpenTurn(entries, seq, at, (blocks) => withBlockText(blocks, 'text', id, text, mode));
@@ -247,9 +252,10 @@ export const applySessionEvent = (state: SessionTranscriptState, event: SessionE
       break;
     }
     case 'permission.request': {
-      entries = withRequestText(entries, seq, at, `request-${data.requestId}`,
-        `Approval requested: ${String(data.title ?? data.toolName)}`, 'replace');
+      entries = withBlocks(entries, seq, at, parent, (blocks) => withBlockText(blocks, 'text', `request-${data.requestId}`,
+        `Approval requested: ${String(data.title ?? data.toolName)}`, 'replace'));
       pending = [...pending.filter((request) => request.requestId !== String(data.requestId)), {
+        ...requestOwner(parent, data.background),
         kind: 'permission',
         requestId: String(data.requestId),
         toolName: String(data.toolName),
@@ -259,9 +265,10 @@ export const applySessionEvent = (state: SessionTranscriptState, event: SessionE
       break;
     }
     case 'question.request': {
-      entries = withRequestText(entries, seq, at, `request-${data.requestId}`,
-        ((data.questions as AgentQuestion[]) ?? []).map((question) => question.question).join('\n'), 'replace');
+      entries = withBlocks(entries, seq, at, parent, (blocks) => withBlockText(blocks, 'text', `request-${data.requestId}`,
+        ((data.questions as AgentQuestion[]) ?? []).map((question) => question.question).join('\n'), 'replace'));
       pending = [...pending.filter((request) => request.requestId !== String(data.requestId)), {
+        ...requestOwner(parent, data.background),
         kind: 'question',
         requestId: String(data.requestId),
         questions: (data.questions as AgentQuestion[] | undefined) ?? [],
@@ -270,8 +277,10 @@ export const applySessionEvent = (state: SessionTranscriptState, event: SessionE
     }
     case 'permission.resolved':
     case 'question.resolved': {
-      entries = withRequestText(entries, seq, at, `answer-${data.requestId}`,
-        data.answers ? Object.entries(data.answers as Record<string, string | string[]>).map(([question, answer]) => `**${question}**\n\n${Array.isArray(answer) ? answer.join(', ') : answer}`).join('\n\n') : `Decision: ${String(data.decision ?? 'resolved')}`, 'replace');
+      // The answer lands where the question was asked: the main turn or the asking agent.
+      const owner = pending.find((request) => request.requestId === String(data.requestId))?.parentToolUseId ?? null;
+      entries = withBlocks(entries, seq, at, owner, (blocks) => withBlockText(blocks, 'text', `answer-${data.requestId}`,
+        data.answers ? Object.entries(data.answers as Record<string, string | string[]>).map(([question, answer]) => `**${question}**\n\n${Array.isArray(answer) ? answer.join(', ') : answer}`).join('\n\n') : `Decision: ${String(data.decision ?? 'resolved')}`, 'replace'));
       pending = pending.filter((request) => request.requestId !== String(data.requestId));
       break;
     }
@@ -288,7 +297,8 @@ export const applySessionEvent = (state: SessionTranscriptState, event: SessionE
           usage: (data.usage as Record<string, unknown> | null | undefined) ?? null,
         },
       });
-      pending = [];
+      // A background agent's question outlives the turn that launched it.
+      pending = pending.filter((request) => request.background);
       changesStatus = 'loading';
       changesError = null;
       break;
