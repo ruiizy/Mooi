@@ -23,5 +23,17 @@ export const subagentStatusTone = (status: SubagentStatus): Tone => tones[status
 
 export const subagentStatusLabel = (status: SubagentStatus): string => labels[status];
 
-export const subagentStatusPulses = (status: SubagentStatus): boolean =>
+const countLabels: Record<SubagentStatus, string> = {
+  started: 'working',
+  working: 'working',
+  waiting: 'waiting for you',
+  completed: 'done',
+  interrupted: 'interrupted',
+  failed: 'failed',
+};
+
+/** One segment of a fan-out summary: "2 working", "1 waiting for you". */
+export const subagentCountLabel = (status: SubagentStatus, count: number): string => `${count} ${countLabels[status]}`;
+
+export const subagentStatusPulses =(status: SubagentStatus): boolean =>
   status === 'started' || status === 'working' || status === 'waiting';
