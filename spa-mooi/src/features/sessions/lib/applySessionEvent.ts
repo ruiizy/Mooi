@@ -236,7 +236,10 @@ export const applySessionEvent = (state: SessionTranscriptState, event: SessionE
       break;
     }
     case 'subagent.updated': {
-      entries = withSubagent(entries, String(data.toolUseId), (subagent) => applySubagentUpdate(subagent, data)) ?? entries;
+      // An agent with another unanswered request is still waiting when it reports "working" for the one just answered.
+      const asking = data.status === 'working' && pending.some((request) => request.parentToolUseId === String(data.toolUseId));
+      entries = withSubagent(entries, String(data.toolUseId), (subagent) =>
+        applySubagentUpdate(subagent, asking ? { ...data, status: 'waiting' } : data)) ?? entries;
       break;
     }
     case 'tool.result': {
@@ -282,6 +285,11 @@ export const applySessionEvent = (state: SessionTranscriptState, event: SessionE
       entries = withBlocks(entries, seq, at, owner, (blocks) => withBlockText(blocks, 'text', `answer-${data.requestId}`,
         data.answers ? Object.entries(data.answers as Record<string, string | string[]>).map(([question, answer]) => `**${question}**\n\n${Array.isArray(answer) ? answer.join(', ') : answer}`).join('\n\n') : `Decision: ${String(data.decision ?? 'resolved')}`, 'replace'));
       pending = pending.filter((request) => request.requestId !== String(data.requestId));
+      // Its last request answered, the agent is no longer waiting on the player.
+      if (owner && !pending.some((request) => request.parentToolUseId === owner)) {
+        entries = withSubagent(entries, owner, (subagent) =>
+          (subagent.status === 'waiting' ? { ...subagent, status: 'working' } : subagent)) ?? entries;
+      }
       break;
     }
     case 'turn.result': {

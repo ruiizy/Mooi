@@ -8,6 +8,7 @@ import { AsideStack } from '@/features/sessions/components/chat/AsideStack';
 import { SubagentPanel } from '@/features/sessions/components/chat/SubagentPanel';
 import { SubagentTrack } from '@/features/sessions/components/chat/SubagentTrack';
 import { useAsides } from '@/features/sessions/hooks/useAsides';
+import { usePruneRequestDrafts } from '@/features/sessions/hooks/usePruneRequestDrafts';
 import { RecipesButton } from '@/features/recipes/components/RecipesButton';
 import type { SessionStreamState } from '@/features/sessions/lib/openSessionStream';
 import type { PreparedImage } from '@/features/sessions/types/PreparedImage';
@@ -63,6 +64,7 @@ export const ChatPanel = ({
 }: ChatPanelProps) => {
   const [sending, setSending] = useState(false);
   const asides = useAsides(session.id);
+  usePruneRequestDrafts(session.id, pending);
   const working = session.status === 'working' || session.status === 'waiting';
   const deploying = session.deployment.state === 'starting';
   const canSend = session.status === 'ready' && !busy && !sending && !deploying;
@@ -114,7 +116,7 @@ export const ChatPanel = ({
 
     <AsideStack asides={asides.asides} onDismiss={asides.dismiss} />
 
-    <SubagentTrack entries={entries} />
+    <SubagentTrack entries={entries} pending={pending} />
 
     <ChatComposer
       key={`composer-${session.id}`}
@@ -144,7 +146,8 @@ export const ChatPanel = ({
     />
   </div>
 
-    <SubagentPanel sessionId={session.id} entries={entries} showThinking={session.capabilities.thinking} />
+    <SubagentPanel sessionId={session.id} entries={entries} pending={pending} showThinking={session.capabilities.thinking}
+      actions={{ busy, editableToolInput: session.capabilities.editableToolInput, onAllowPermission, onDenyPermission, onAnswerQuestion }} />
   </div>
   );
 };

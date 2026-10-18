@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react';
 import { CircleHelp } from 'lucide-react';
 import type { SessionPendingRequest } from '@/features/sessions/types/SessionPendingRequest';
 import { Button } from '@/shared/components/Button';
 import { cn } from '@/shared/utils/cn';
+import { useRequestDraftsStore } from '@/stores/requestDraftsStore';
 
 type QuestionPending = Extract<SessionPendingRequest, { kind: 'question' }>;
 
@@ -17,28 +17,21 @@ const OTHER = '__other__';
 /**
  * The agent asked one or more structured questions (`AskUserQuestion`). Every question needs an
  * answer — a declared option or free text through "Other" — before the single "Send answers"
- * action builds the `{[question]: label | labels}` payload the SDK expects.
+ * action builds the `{[question]: label | labels}` payload the SDK expects. The draft lives in the
+ * store, so the same question shown in the chat and in a subagent's panel shares it.
  */
 export const QuestionCard = ({ request, busy, onAnswer }: QuestionCardProps) => {
-  const [selected, setSelected] = useState<Record<string, string[]>>({});
-  const [otherText, setOtherText] = useState<Record<string, string>>({});
-
-  useEffect(() => {
-    setSelected({});
-    setOtherText({});
-  }, [request.requestId]);
+  const draft = useRequestDraftsStore((state) => state.drafts[request.requestId]);
+  const update = useRequestDraftsStore((state) => state.update);
+  const selected = draft?.selected ?? {};
+  const otherText = draft?.other ?? {};
 
   const toggleOption = (question: string, label: string, multiSelect: boolean) => {
-    setSelected((current) => {
-      const picked = current[question] ?? [];
-
-      if (multiSelect) {
-        const next = picked.includes(label) ? picked.filter((item) => item !== label) : [...picked, label];
-        return { ...current, [question]: next };
-      }
-
-      return { ...current, [question]: picked.includes(label) ? [] : [label] };
-    });
+    const picked = selected[question] ?? [];
+    const next = multiSelect
+      ? picked.includes(label) ? picked.filter((item) => item !== label) : [...picked, label]
+      : picked.includes(label) ? [] : [label];
+    update(request.requestId, { selected: { ...selected, [question]: next } });
   };
 
   const isAnswered = (question: string): boolean => {
@@ -128,7 +121,7 @@ export const QuestionCard = ({ request, busy, onAnswer }: QuestionCardProps) => 
                   <input
                     value={otherText[entry.question] ?? ''}
                     onChange={(event) =>
-                      setOtherText((current) => ({ ...current, [entry.question]: event.target.value }))
+                      update(request.requestId, { other: { ...otherText, [entry.question]: event.target.value } })
                     }
                     placeholder="Type your answer…"
                     autoComplete="off"
