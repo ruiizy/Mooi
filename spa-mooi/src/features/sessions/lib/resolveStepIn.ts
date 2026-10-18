@@ -13,10 +13,13 @@ interface StepOutcome {
  * report; a detached one keeps working, so only a failure to start it ends it here.
  */
 const settleDelegation = (subagent: TranscriptSubagent, outcome: StepOutcome): TranscriptSubagent => {
+  // The agent's own report outranks what the call returned; the call outranks a summary.
+  const result = subagent.resultSource !== 'report' && outcome.summary
+    ? { result: outcome.summary, resultSource: 'call' as const } : {};
   if (subagent.detached) {
-    return outcome.isError ? { ...subagent, status: 'failed', result: outcome.summary || subagent.result } : subagent;
+    return outcome.isError ? { ...subagent, ...result, status: 'failed' } : subagent;
   }
-  return { ...subagent, status: outcome.isError ? 'failed' : 'completed', result: outcome.summary || subagent.result };
+  return { ...subagent, ...result, status: outcome.isError ? 'failed' : 'completed' };
 };
 
 /** Resolves the step or delegation with `toolUseId`, searching nested delegations; null if absent. */

@@ -2,8 +2,7 @@ import { memo } from 'react';
 import { CircleAlert } from 'lucide-react';
 import { MessageImageGrid } from './MessageImageGrid';
 import { NoticeItem } from './NoticeItem';
-import { transcriptBlockKey } from '@/features/sessions/lib/transcriptBlockKey';
-import { TranscriptContent } from './TranscriptContent';
+import { TranscriptBlockList } from './TranscriptBlockList';
 import { ThinkingIndicator } from '@/features/sessions/components/chat/ThinkingIndicator';
 import { TurnFooter } from '@/features/sessions/components/chat/TurnFooter';
 import type { AgentCapabilities } from '@/features/sessions/types/AgentCapabilities';
@@ -64,10 +63,8 @@ export const ChatMessageItem = memo(function ChatMessageItem({ sessionId, entry,
           <span className="text-xs text-ink-subtle">{formatTime(entry.at)}</span>
         </p>
 
-        <div className="mt-1.5 flex flex-col gap-2">
-          {entry.blocks.map((block) => block.kind === 'thinking' && !capabilities.thinking ? null : (
-            <TranscriptContent key={transcriptBlockKey(block)} sessionId={sessionId} block={block} />
-          ))}
+        <div className="mt-1.5">
+          <TranscriptBlockList sessionId={sessionId} blocks={entry.blocks} showThinking={capabilities.thinking} />
         </div>
 
         {entry.streaming && working ? (

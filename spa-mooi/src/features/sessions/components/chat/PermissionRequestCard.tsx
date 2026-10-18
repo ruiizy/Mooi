@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react';
 import { ShieldAlert } from 'lucide-react';
 import type { SessionPendingRequest } from '@/features/sessions/types/SessionPendingRequest';
 import { Button } from '@/shared/components/Button';
+import { useRequestDraftsStore } from '@/stores/requestDraftsStore';
 
 type PermissionPending = Extract<SessionPendingRequest, { kind: 'permission' }>;
 
@@ -16,17 +16,17 @@ interface PermissionRequestCardProps {
 /**
  * The agent is blocked on a tool-use approval. The input is only editable when the session's
  * provider declares `editableToolInput` — a provider without it ignores the field,
- * so sending an edit it never asked for would silently do nothing.
+ * so sending an edit it never asked for would silently do nothing. Edits and the deny reason live
+ * in the store, shared by every place showing this request.
  */
 export const PermissionRequestCard = ({ request, editable, busy, onAllow, onDeny }: PermissionRequestCardProps) => {
   const inputText = JSON.stringify(request.input, null, 2);
-  const [draft, setDraft] = useState(inputText);
-  const [reason, setReason] = useState('');
-
-  useEffect(() => {
-    setDraft(inputText);
-    setReason('');
-  }, [request.requestId, inputText]);
+  const saved = useRequestDraftsStore((state) => state.drafts[request.requestId]);
+  const update = useRequestDraftsStore((state) => state.update);
+  const draft = saved?.input ?? inputText;
+  const reason = saved?.reason ?? '';
+  const setDraft = (input: string) => update(request.requestId, { input });
+  const setReason = (value: string) => update(request.requestId, { reason: value });
 
   let parsedInput: Record<string, unknown> | null = null;
   let parseError: string | null = null;

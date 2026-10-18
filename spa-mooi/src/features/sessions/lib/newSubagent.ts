@@ -16,5 +16,6 @@ export const newSubagent = (toolUseId: string, title: string, input: Record<stri
   lastToolName: null,
   usage: null,
   result: null,
+  resultSource: null,
   blocks: [],
 });

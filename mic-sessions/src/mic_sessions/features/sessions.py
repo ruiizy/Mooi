@@ -120,6 +120,10 @@ EVENT_PRODUCTION_UPDATED = "production.updated"
 EVENT_SESSION_CLEARED = "session.cleared"
 EVENT_SESSION_COMPACTION = "session.compaction"
 EVENT_MERGE_COMPLETED = "merge.completed"
+EVENT_SUBAGENT_UPDATED = "subagent.updated"
+_DELEGATION_TOOLS = frozenset({"Agent", "Task"})
+_SUBAGENT_STATUSES = frozenset({"started", "working", "waiting", "completed", "interrupted", "failed"})
+_SUBAGENT_ACTIVE = frozenset({"started", "working", "waiting"})
 
 # --- wire contracts ---------------------------------------------------------------------------
 
@@ -474,6 +478,12 @@ async def _github_api(caller: Caller, full_name: str, method: str, path: str,
     return response.json()
 
 
+class SubagentsPayload(BaseModel):
+    """Delegated agents still at work, so lists can say so without opening the session's stream."""
+    working: int = 0
+    waiting: int = 0
+
+
 class PendingPayload(BaseModel):
     kind: str
     requestId: str
@@ -507,6 +517,7 @@ class SessionPayload(BaseModel):
     baseCommit: str | None
     # Failed with its runtime and workspace intact: `POST /sessions/{id}/recover` reconnects it.
     recoverable: bool = False
+    subagents: SubagentsPayload = Field(default_factory=SubagentsPayload)
 
 
 class SessionsResponse(BaseModel):
@@ -684,6 +695,8 @@ class Session:
     # Side questions being answered right now; they never enter the log.
     asides: int = 0
     interactions: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Delegated agents by delegating call: {"status", "detached"}. Mirrors the SPA's fold.
+    subagents: dict[str, dict[str, Any]] = field(default_factory=dict)
     # --- push-based changes refresh ---
     changes_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     changes_task: asyncio.Task[None] | None = None
@@ -726,6 +739,10 @@ class Session:
             workspacePath=None if self.kind in _PLATFORM_KINDS or self.workspace == _UNSET_PATH else str(self.workspace),
             baseCommit=self.base_commit or None,
             recoverable=self.status == STATUS_FAILED and _recoverable(self),
+            subagents=SubagentsPayload(
+                working=sum(1 for item in self.subagents.values() if item["status"] in ("started", "working")),
+                waiting=sum(1 for item in self.subagents.values() if item["status"] == "waiting"),
+            ),
         )
 
 
@@ -898,6 +915,7 @@ def record(session: Session, type_: str, data: dict[str, Any]) -> Event:
         if session.status in (STATUS_FAILED, "closed"):
             session.interactions.clear()
             session.pending = None
+            _settle_subagents(session, keep_detached=False)
     elif type_ in (EVENT_PERMISSION_REQUEST, EVENT_QUESTION_REQUEST):
         kind = PENDING_KIND_PERMISSION if type_ == EVENT_PERMISSION_REQUEST else PENDING_KIND_QUESTION
         session.status = STATUS_WAITING
@@ -906,16 +924,21 @@ def record(session: Session, type_: str, data: dict[str, Any]) -> Event:
     elif type_ in (EVENT_PERMISSION_RESOLVED, EVENT_QUESTION_RESOLVED):
         session.interactions.pop(str(data.get("requestId")), None)
         remaining = next(iter(session.interactions.values()), None)
-        session.status = STATUS_WAITING if remaining else STATUS_WORKING
+        # A background agent's answer after the main turn ended leaves no turn running.
+        session.status = STATUS_WAITING if remaining else STATUS_WORKING if session.turn_id else STATUS_READY
         session.pending = PendingInfo(remaining["kind"], remaining["requestId"]) if remaining else None
     elif type_ == EVENT_TURN_RESULT:
-        session.status = STATUS_READY
-        session.pending = None
-        session.interactions.clear()
+        # A background agent's question outlives the turn that launched it; nothing else does.
+        session.interactions = {key: value for key, value in session.interactions.items() if value.get("background")}
+        remaining = next(iter(session.interactions.values()), None)
+        session.status = STATUS_WAITING if remaining else STATUS_READY
+        session.pending = PendingInfo(remaining["kind"], remaining["requestId"]) if remaining else None
         session.turn_id = None
+        _settle_subagents(session, keep_detached=True)
     elif type_ == EVENT_SESSION_CLEARED:
         session.pending = None
         session.interactions.clear()
+        session.subagents.clear()
         session.turn_id = None
         session.usage = {**session.usage, "context": None}
         session.platform_briefed = False
@@ -934,8 +957,40 @@ def record(session: Session, type_: str, data: dict[str, Any]) -> Event:
             effort=data.get("effort"),
         )
 
+    _observe_subagents(session, type_, data)
     _observe_changes(session, type_, data)
     return event
+
+
+def _observe_subagents(session: Session, type_: str, data: dict[str, Any]) -> None:
+    """Folds delegations the way the SPA does: a foreground agent ends with its delegating call and
+    cannot be revived by late progress; a detached one may be resumed by its delegator."""
+    tool_use_id = str(data.get("toolUseId") or "")
+    if type_ == EVENT_TOOL_USE and data.get("name") in _DELEGATION_TOOLS:
+        detached = (data.get("input") or {}).get("run_in_background") is True
+        session.subagents.setdefault(tool_use_id, {"status": "started", "detached": detached})
+        return
+    subagent = session.subagents.get(tool_use_id)
+    if subagent is None:
+        return
+    if type_ == EVENT_TOOL_RESULT and not subagent["detached"]:
+        subagent["status"] = "failed" if data.get("isError") else "completed"
+    elif type_ == EVENT_TOOL_RESULT and data.get("isError"):
+        subagent["status"] = "failed"
+    elif type_ == EVENT_SUBAGENT_UPDATED:
+        if data.get("detached") is True:
+            subagent["detached"] = True
+        status = data.get("status")
+        ended = subagent["status"] not in _SUBAGENT_ACTIVE
+        if status in _SUBAGENT_STATUSES and not (ended and not subagent["detached"] and status in _SUBAGENT_ACTIVE) \
+                and not (status == "started" and subagent["status"] != "started"):
+            subagent["status"] = status
+
+
+def _settle_subagents(session: Session, *, keep_detached: bool) -> None:
+    for subagent in session.subagents.values():
+        if subagent["status"] in _SUBAGENT_ACTIVE and not (keep_detached and subagent["detached"]):
+            subagent["status"] = "interrupted"
 
 
 def _record_event(session: Session, event: AgentEvent) -> Event:

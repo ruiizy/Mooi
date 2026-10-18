@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowDown, LoaderCircle, MessagesSquare } from 'lucide-react';
 import { ChatMessageItem } from './ChatMessageItem';
-import { PermissionRequestCard } from './PermissionRequestCard';
-import { QuestionCard } from './QuestionCard';
+import { PendingRequestCard } from './PendingRequestCard';
+import { collectSubagents } from '@/features/sessions/lib/collectSubagents';
 import { isProviderPlaceholder } from '@/features/sessions/lib/isProviderPlaceholder';
 import type { AgentCapabilities } from '@/features/sessions/types/AgentCapabilities';
 import type { SessionPendingRequest } from '@/features/sessions/types/SessionPendingRequest';
@@ -45,6 +45,7 @@ export const ChatMessageList = ({
     (entry.streaming && working) || entry.result || entry.blocks.some((block) =>
       block.kind === 'step' || block.kind === 'subagent' || ((block.kind !== 'thinking' || capabilities.thinking) && block.text.trim() && !isProviderPlaceholder(block.text))));
   const hasStreamingAssistant = visibleEntries.some((entry) => entry.kind === 'assistant' && entry.streaming);
+  const owners = useMemo(() => new Map(collectSubagents(entries).map(({ subagent }) => [subagent.toolUseId, subagent])), [entries]);
 
   useEffect(() => {
     const list = listRef.current;
@@ -95,17 +96,9 @@ export const ChatMessageList = ({
             ) : null}
             {pending.map((request) => (
               <li key={`pending-${request.requestId}`} aria-label={request.kind === 'question' ? 'Pending question' : 'Pending permission'}>
-                {request.kind === 'permission' ? (
-                  <PermissionRequestCard
-                    request={request}
-                    editable={editableToolInput}
-                    busy={busy}
-                    onAllow={onAllowPermission}
-                    onDeny={onDenyPermission}
-                  />
-                ) : (
-                  <QuestionCard request={request} busy={busy} onAnswer={onAnswerQuestion} />
-                )}
+                <PendingRequestCard request={request} showOwner queued={pending.length > 1} busy={busy} editable={editableToolInput}
+                  owner={request.parentToolUseId ? owners.get(request.parentToolUseId) ?? null : null}
+                  onAllowPermission={onAllowPermission} onDenyPermission={onDenyPermission} onAnswerQuestion={onAnswerQuestion} />
               </li>
             ))}
           </>}

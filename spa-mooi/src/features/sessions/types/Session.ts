@@ -5,6 +5,7 @@ import type { AgentCapabilities } from '@/features/sessions/types/AgentCapabilit
 import type { PendingRequest } from '@/features/sessions/types/PendingRequest';
 import type { SessionKind } from '@/features/sessions/types/SessionKind';
 import type { SessionStatus } from '@/features/sessions/types/SessionStatus';
+import type { SessionSubagents } from '@/features/sessions/types/SessionSubagents';
 
 export interface Session {
   id: string;
@@ -35,4 +36,6 @@ export interface Session {
   baseCommit: string | null;
   /** Failed with its agent and workspace intact: reconnecting resumes the conversation. */
   recoverable?: boolean;
+  /** Delegated agents still working or waiting on the player; absent from older servers. */
+  subagents?: SessionSubagents;
 }

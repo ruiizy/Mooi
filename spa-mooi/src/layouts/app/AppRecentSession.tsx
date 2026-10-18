@@ -2,7 +2,10 @@ import { Link, useLocation } from 'react-router-dom';
 import { sessionChatLabel } from '@/features/sessions/lib/sessionChatLabel';
 import { sessionChatPath } from '@/features/sessions/lib/sessionChatPath';
 import { sessionKindIcon } from '@/features/sessions/lib/sessionKindIcon';
+import { sessionSubagentCounts } from '@/features/sessions/lib/sessionSubagentCounts';
+import { subagentCountLabel } from '@/features/sessions/lib/subagentStatusTone';
 import { sessionStatusLabel, sessionStatusPulses, sessionStatusTone } from '@/features/sessions/lib/sessionStatusTone';
+import { SessionSubagentsChip } from '@/features/sessions/components/SessionSubagentsChip';
 import type { Session } from '@/features/sessions/types/Session';
 import { StatusDot } from '@/shared/components/StatusDot';
 import { cn } from '@/shared/utils/cn';
@@ -21,13 +24,14 @@ export const AppRecentSession = ({ session, onNavigate }: AppRecentSessionProps)
   const Icon = sessionKindIcon(session.kind);
   const label = sessionChatLabel(session);
   const status = sessionStatusLabel(session.status);
+  const subagents = sessionSubagentCounts(session.subagents).map(({ status: kind, count }) => subagentCountLabel(kind, count)).join(', ');
 
   return (
     <li>
       <Link
         to={to}
         onClick={onNavigate}
-        title={`${label} · ${status}`}
+        title={`${label} · ${status}${subagents ? ` · ${subagents}` : ''}`}
         aria-current={active ? 'page' : undefined}
         className={cn(
           'flex min-h-11 items-center gap-2.5 rounded-[10px] py-1.5 pr-3 pl-2.5 transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand',
@@ -39,7 +43,8 @@ export const AppRecentSession = ({ session, onNavigate }: AppRecentSessionProps)
           <span className={cn('block truncate text-xs font-bold', session.kind === 'session' && 'font-mono')}>{label}</span>
           <span className="mt-0.5 flex items-center gap-1.5 text-[11px] font-semibold text-ink-subtle">
             <StatusDot tone={sessionStatusTone(session.status)} pulse={sessionStatusPulses(session.status)} />
-            <span className="truncate">{status}</span>
+            <span className="min-w-0 truncate">{status}</span>
+            <SessionSubagentsChip subagents={session.subagents} compact className="ml-auto" />
           </span>
         </span>
       </Link>

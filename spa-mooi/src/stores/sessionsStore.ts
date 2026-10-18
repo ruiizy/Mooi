@@ -2,6 +2,7 @@ import { mergeDeployment } from '@/features/sessions/lib/mergeDeployment';
 import type { Session } from '@/features/sessions/types/Session';
 import { create } from 'zustand';
 import { applySessionEvent, emptyTranscriptState } from '@/features/sessions/lib/applySessionEvent';
+import { withLiveSubagents } from '@/features/sessions/lib/withLiveSubagents';
 import { applySessionToSession } from '@/features/sessions/lib/applySessionToSession';
 import type { SessionsState } from '@/stores/types/SessionsState';
 
@@ -88,8 +89,8 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       return {
         byId: { ...state.byId, [sessionId]: transcript },
         sessions: hasSession
-          ? state.sessions.map((session) => (session.id === sessionId ? { ...applySessionToSession(session, event),
-            ...(transcript.pending.length && !event.type.startsWith('deployment.') ? { status: 'waiting' as const } : {}) } : session))
+          ? state.sessions.map((session) => (session.id === sessionId ? withLiveSubagents({ ...applySessionToSession(session, event),
+            ...(transcript.pending.length && !event.type.startsWith('deployment.') ? { status: 'waiting' as const } : {}) }, transcript, event) : session))
           : event.type === 'session.sync' ? [...state.sessions, event.data.session as unknown as Session] : state.sessions,
       };
     }),
