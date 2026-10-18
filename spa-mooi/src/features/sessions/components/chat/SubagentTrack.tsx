@@ -1,6 +1,7 @@
-import { useCallback, useId, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { SubagentTrackList } from './SubagentTrackList';
 import { SubagentTrackPill } from './SubagentTrackPill';
+import { useSubagentParam } from '@/features/sessions/hooks/useSubagentParam';
 import { collectSubagents } from '@/features/sessions/lib/collectSubagents';
 import type { TranscriptEntry } from '@/features/sessions/types/TranscriptEntry';
 import { Modal } from '@/shared/components/Modal';
@@ -9,26 +10,26 @@ import { useOnClickOutside } from '@/shared/hooks/useOnClickOutside';
 import { useOnEscape } from '@/shared/hooks/useOnEscape';
 
 interface SubagentTrackProps {
-  sessionId: string;
   entries: TranscriptEntry[];
-  showThinking: boolean;
 }
 
 /**
  * A lane above the composer for the session's delegations: a pill counting them by state, and
  * behind it every subagent — a popover anchored to the pill on wide screens, a bottom sheet on
- * phones. Absent until the agent delegates for the first time.
+ * phones. Picking one opens its panel and folds the list away. Absent until the agent delegates.
  */
-export const SubagentTrack = ({ sessionId, entries, showThinking }: SubagentTrackProps) => {
+export const SubagentTrack = ({ entries }: SubagentTrackProps) => {
   const items = useMemo(() => collectSubagents(entries), [entries]);
   const subagents = useMemo(() => items.map(({ subagent }) => subagent), [items]);
   const [open, setOpen] = useState(false);
+  const { agentId } = useSubagentParam();
   const wide = useMediaQuery('(min-width: 640px)');
   const panelId = useId();
   const containerRef = useRef<HTMLDivElement>(null);
   const pillRef = useRef<HTMLButtonElement>(null);
   const close = useCallback(() => setOpen(false), []);
 
+  useEffect(close, [agentId, close]);
   useOnClickOutside(containerRef, close, open && wide);
   useOnEscape(() => {
     close();
@@ -37,7 +38,7 @@ export const SubagentTrack = ({ sessionId, entries, showThinking }: SubagentTrac
 
   if (items.length === 0) return null;
 
-  const list = <SubagentTrackList sessionId={sessionId} items={items} showThinking={showThinking} />;
+  const list = <SubagentTrackList items={items} />;
 
   return (
     <section aria-label="Subagents" className="mx-auto w-full max-w-[60rem] shrink-0 px-2.5 pt-2 sm:px-8">

@@ -1,21 +1,18 @@
 import { useState } from 'react';
 import { SubagentRow } from './SubagentRow';
-import { TranscriptBlockList } from './TranscriptBlockList';
 import { isTerminalSubagentStatus } from '@/features/sessions/lib/isTerminalSubagentStatus';
 import type { CollectedSubagent } from '@/features/sessions/types/CollectedSubagent';
 import { cn } from '@/shared/utils/cn';
 
 interface SubagentTrackListProps {
-  sessionId: string;
   items: CollectedSubagent[];
-  showThinking: boolean;
 }
 
 /**
  * Every delegation of the session, nested ones indented under their delegator. Finished agents
  * can be hidden so a long-running session keeps what still matters on top.
  */
-export const SubagentTrackList = ({ sessionId, items, showThinking }: SubagentTrackListProps) => {
+export const SubagentTrackList = ({ items }: SubagentTrackListProps) => {
   const [hideFinished, setHideFinished] = useState(false);
   const finished = items.filter(({ subagent }) => isTerminalSubagentStatus(subagent.status)).length;
   const visible = hideFinished ? items.filter(({ subagent }) => !isTerminalSubagentStatus(subagent.status)) : items;
@@ -39,12 +36,7 @@ export const SubagentTrackList = ({ sessionId, items, showThinking }: SubagentTr
 
       {visible.length ? (
         <ul className="divide-y divide-line">
-          {visible.map(({ subagent, depth }) => (
-            <SubagentRow key={subagent.toolUseId} subagent={subagent} depth={depth}
-              renderActivity={(blocks, parent) => (
-                <TranscriptBlockList sessionId={sessionId} blocks={blocks} showThinking={showThinking} compact delegatedBy={parent} />
-              )} />
-          ))}
+          {visible.map(({ subagent, depth }) => <SubagentRow key={subagent.toolUseId} subagent={subagent} depth={depth} />)}
         </ul>
       ) : <p className="px-3 py-4 text-center text-xs text-ink-subtle">Every subagent has finished.</p>}
     </div>

@@ -5,6 +5,7 @@ import { CircleAlert, LoaderCircle } from 'lucide-react';
 import { ChatComposer } from '@/features/sessions/components/chat/ChatComposer';
 import { ChatMessageList } from '@/features/sessions/components/chat/ChatMessageList';
 import { AsideStack } from '@/features/sessions/components/chat/AsideStack';
+import { SubagentPanel } from '@/features/sessions/components/chat/SubagentPanel';
 import { SubagentTrack } from '@/features/sessions/components/chat/SubagentTrack';
 import { useAsides } from '@/features/sessions/hooks/useAsides';
 import { RecipesButton } from '@/features/recipes/components/RecipesButton';
@@ -78,7 +79,8 @@ export const ChatPanel = ({
   };
 
   return (
-  <div className="flex h-full min-h-0 flex-col">
+  <div className="flex h-full min-h-0">
+  <div className="flex min-h-0 min-w-0 flex-1 flex-col">
     {streamState === 'reconnecting' ? (
       <p className="flex shrink-0 items-center gap-2 border-b border-line bg-warning-soft px-4 py-2 text-xs text-warning">
         <LoaderCircle className="size-3.5 animate-spin" />
@@ -112,7 +114,7 @@ export const ChatPanel = ({
 
     <AsideStack asides={asides.asides} onDismiss={asides.dismiss} />
 
-    <SubagentTrack sessionId={session.id} entries={entries} showThinking={session.capabilities.thinking} />
+    <SubagentTrack entries={entries} />
 
     <ChatComposer
       key={`composer-${session.id}`}
@@ -140,6 +142,9 @@ export const ChatPanel = ({
       onConfigurationChange={onConfigurationChange}
       actions={session.kind === 'session' ? <RecipesButton disabled={!canSend} onApply={(text) => send(text)} /> : null}
     />
+  </div>
+
+    <SubagentPanel sessionId={session.id} entries={entries} showThinking={session.capabilities.thinking} />
   </div>
   );
 };

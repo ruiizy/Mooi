@@ -169,6 +169,7 @@
   --animate-menu-in: menu-in 0.16s cubic-bezier(0.16, 1, 0.3, 1) both;
   --animate-drawer-in: drawer-in 0.28s cubic-bezier(0.32, 0.72, 0, 1) both;
   --animate-sheet-in: sheet-in 0.32s cubic-bezier(0.32, 0.72, 0, 1) both;
+  --animate-panel-in: panel-in 0.24s cubic-bezier(0.16, 1, 0.3, 1) both;
   --animate-voice-bar: voice-bar 0.9s ease-in-out infinite;
   --animate-orb-ping: orb-ping 2.4s cubic-bezier(0, 0, 0.2, 1) infinite;
   --animate-step-fill: step-fill linear both;
@@ -263,6 +264,18 @@
     }
     to {
       transform: translateY(0);
+    }
+  }
+
+  /* A side panel eases in from its own edge, a short distance: it joins the layout, not covers it. */
+  @keyframes panel-in {
+    from {
+      opacity: 0;
+      transform: translateX(1.5rem);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(0);
     }
   }
 

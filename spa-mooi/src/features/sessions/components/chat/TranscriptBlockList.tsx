@@ -17,7 +17,7 @@ interface TranscriptBlockListProps {
 
 /**
  * A turn's blocks in the order they happened, with delegations launched together folded into one
- * group. The same list renders a delegation's own activity, so nesting has no depth limit.
+ * group. The same list renders a subagent's own timeline in its panel, nested delegations included.
  */
 export const TranscriptBlockList = ({ sessionId, blocks, showThinking, compact = false, delegatedBy = null }: TranscriptBlockListProps) => {
   const groups = useMemo(() => groupTranscriptBlocks(blocks), [blocks]);
@@ -26,12 +26,7 @@ export const TranscriptBlockList = ({ sessionId, blocks, showThinking, compact =
     <div className={cn('flex flex-col', compact ? 'gap-1.5' : 'gap-2')}>
       {groups.map((group) => {
         if (group.kind === 'subagents') {
-          return (
-            <SubagentGroup key={group.key} subagents={group.subagents} delegatedBy={delegatedBy}
-              renderActivity={(nested, parent) => (
-                <TranscriptBlockList sessionId={sessionId} blocks={nested} showThinking={showThinking} compact delegatedBy={parent} />
-              )} />
-          );
+          return <SubagentGroup key={group.key} subagents={group.subagents} delegatedBy={delegatedBy} />;
         }
         if (group.block.kind === 'thinking' && !showThinking) return null;
         return <TranscriptContent key={group.key} sessionId={sessionId} block={group.block} compact={compact} />;

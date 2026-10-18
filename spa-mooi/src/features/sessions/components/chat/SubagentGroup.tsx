@@ -1,9 +1,7 @@
-import type { ReactNode } from 'react';
 import { Bot } from 'lucide-react';
 import { SubagentRow } from './SubagentRow';
 import { summarizeSubagents } from '@/features/sessions/lib/summarizeSubagents';
 import { subagentCountLabel, subagentStatusTone } from '@/features/sessions/lib/subagentStatusTone';
-import type { TranscriptBlock } from '@/features/sessions/types/TranscriptBlock';
 import type { TranscriptSubagent } from '@/features/sessions/types/TranscriptSubagent';
 import { StatusDot } from '@/shared/components/StatusDot';
 
@@ -11,14 +9,13 @@ interface SubagentGroupProps {
   subagents: TranscriptSubagent[];
   /** Null for the main agent; the delegating subagent's name when nested. */
   delegatedBy: string | null;
-  renderActivity: (blocks: TranscriptBlock[], delegatedBy: string) => ReactNode;
 }
 
 /**
  * Delegations launched together, one row each. A fan-out gets a header counting every state
  * present, so a glance tells how many agents still work, wait on the player or failed.
  */
-export const SubagentGroup = ({ subagents, delegatedBy, renderActivity }: SubagentGroupProps) => {
+export const SubagentGroup = ({ subagents, delegatedBy }: SubagentGroupProps) => {
   const summary = summarizeSubagents(subagents);
   const titled = subagents.length > 1 || delegatedBy !== null;
   const title = subagents.length === 1 ? '1 subagent' : `${subagents.length} subagents`;
@@ -47,7 +44,7 @@ export const SubagentGroup = ({ subagents, delegatedBy, renderActivity }: Subage
 
       <ul className="divide-y divide-line">
         {subagents.map((subagent) => (
-          <SubagentRow key={subagent.toolUseId} subagent={subagent} renderActivity={renderActivity} />
+          <SubagentRow key={subagent.toolUseId} subagent={subagent} />
         ))}
       </ul>
     </div>
