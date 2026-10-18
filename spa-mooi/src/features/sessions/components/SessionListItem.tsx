@@ -2,6 +2,7 @@ import { Link } from 'react-router-dom';
 import { ChevronRight, GitBranch } from 'lucide-react';
 import { sessionPath } from '@/app/paths';
 import { SessionStatusBadge } from '@/features/sessions/components/SessionStatusBadge';
+import { SessionSubagentsChip } from '@/features/sessions/components/SessionSubagentsChip';
 import { SessionAccountIdentity } from '@/features/sessions/components/SessionAccountIdentity';
 import { WorkspacePathLabel } from '@/features/sessions/components/WorkspacePathLabel';
 import type { Session } from '@/features/sessions/types/Session';
@@ -34,6 +35,7 @@ export const SessionListItem = ({ session, backLink }: SessionListItemProps) => 
         <p className="mt-0.5 truncate text-[11px] text-ink-subtle">
           {session.detail ?? `Updated ${formatDate(session.updatedAt)}`}
         </p>
+        <SessionSubagentsChip subagents={session.subagents} className="mt-1" />
         <span className="mt-0.5 block sm:hidden"><SessionAccountIdentity session={session} compact /></span>
         <WorkspacePathLabel path={session.workspacePath} className="mt-1" />
       </div>

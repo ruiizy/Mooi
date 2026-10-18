@@ -389,6 +389,8 @@ class _PendingRequest:
     future: asyncio.Future[dict[str, Any]]
     # The background delegation that asked, if any: it outlives the main turn, and so does its request.
     background_owner: str | None = None
+    # The delegation that asked, background or not: it keeps waiting while another request of its own is parked.
+    delegation: str | None = None
 
 
 class _InMemoryTranscriptStore:
@@ -1063,7 +1065,7 @@ class ClaudeAgentRuntime:
         # task id is the `agent_id` the permission context carries.
         delegation = self._task_tools.get(getattr(context, "agent_id", None) or "")
         background = delegation if delegation in self._background else None
-        self._pending[request_id] = _PendingRequest(_KIND_QUESTION, future, background)
+        self._pending[request_id] = _PendingRequest(_KIND_QUESTION, future, background, delegation or None)
         try:
             if delegation:
                 await self._publish(subagent_updated(delegation, status="waiting"))
@@ -1077,7 +1079,7 @@ class ClaudeAgentRuntime:
             return PermissionResultDeny(message=_DENIED_MESSAGE)
         finally:
             self._pending.pop(request_id, None)
-            if delegation:
+            if delegation and not any(item.delegation == delegation for item in self._pending.values()):
                 await self._publish(subagent_updated(delegation, status="working"))
         return self._decide(payload, input_data, True)
 
@@ -1558,6 +1560,8 @@ class CodexAgentRuntime:
         self._open_steps: set[str] = set()
         # Codex thread id of each delegated agent -> the `spawnAgent` call that delegated it.
         self._delegations: dict[str, str] = {}
+        # Request id -> the delegation that asked, so one answered request does not end another's wait.
+        self._request_owners: dict[str, str] = {}
 
     async def _publish(self, event):
         await self._emit(event["type"], event["data"])
@@ -1647,6 +1651,8 @@ class CodexAgentRuntime:
         # A request from a delegated agent's thread belongs to its delegation. Delegates live on
         # this turn's connection, so their requests end with the turn like the main agent's.
         delegation = self._delegations.get(params.get("threadId") or "")
+        if delegation:
+            self._request_owners[request_id] = delegation
         try:
             if delegation:
                 await self._publish(subagent_updated(delegation, status="waiting"))
@@ -1674,7 +1680,8 @@ class CodexAgentRuntime:
             return {"decision": "accept" if answer.get("decision") == "allow" else "decline"}
         finally:
             self._pending.pop(request_id, None)
-            if delegation and not self._closing:
+            self._request_owners.pop(request_id, None)
+            if delegation and not self._closing and delegation not in self._request_owners.values():
                 await self._publish(subagent_updated(delegation, status="working"))
 
     async def resolve(self, request_id, payload):
