@@ -5,6 +5,7 @@ import { CircleAlert, LoaderCircle } from 'lucide-react';
 import { ChatComposer } from '@/features/sessions/components/chat/ChatComposer';
 import { ChatMessageList } from '@/features/sessions/components/chat/ChatMessageList';
 import { AsideStack } from '@/features/sessions/components/chat/AsideStack';
+import { SubagentTrack } from '@/features/sessions/components/chat/SubagentTrack';
 import { useAsides } from '@/features/sessions/hooks/useAsides';
 import { RecipesButton } from '@/features/recipes/components/RecipesButton';
 import type { SessionStreamState } from '@/features/sessions/lib/openSessionStream';
@@ -110,6 +111,8 @@ export const ChatPanel = ({
     ) : null}
 
     <AsideStack asides={asides.asides} onDismiss={asides.dismiss} />
+
+    <SubagentTrack sessionId={session.id} entries={entries} showThinking={session.capabilities.thinking} />
 
     <ChatComposer
       key={`composer-${session.id}`}

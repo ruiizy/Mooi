@@ -13,14 +13,18 @@ import { cn } from '@/shared/utils/cn';
 interface SubagentRowProps {
   subagent: TranscriptSubagent;
   renderActivity: (blocks: TranscriptBlock[], delegatedBy: string) => ReactNode;
+  /** How deep in other delegations it was launched, in a flat list of every subagent. */
+  depth?: number;
 }
+
+const INDENT_REM = 1;
 
 /**
  * One delegation in a single line: its task, what it is, and how it stands — with the result's
  * first line once it finished. The details unfold in place; nothing here competes with the main
  * agent's answer for space.
  */
-export const SubagentRow = ({ subagent, renderActivity }: SubagentRowProps) => {
+export const SubagentRow = ({ subagent, renderActivity, depth = 0 }: SubagentRowProps) => {
   const [open, setOpen] = useState(false);
   const detailsId = useId();
   const tone = subagentStatusTone(subagent.status);
@@ -37,6 +41,7 @@ export const SubagentRow = ({ subagent, renderActivity }: SubagentRowProps) => {
         aria-expanded={open}
         aria-controls={detailsId}
         aria-label={`${description}, ${status}`}
+        style={depth ? { paddingLeft: `${0.75 + depth * INDENT_REM}rem` } : undefined}
         className="flex min-h-11 w-full items-center gap-2.5 px-3 py-2 text-left transition hover:bg-surface-2 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-brand"
       >
         <StatusDot tone={tone} pulse={subagentStatusPulses(subagent.status)} />
