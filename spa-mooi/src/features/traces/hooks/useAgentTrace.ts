@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { fetchTrace } from '@/features/traces/api/tracesApi';
 import type { AgentTrace } from '@/features/traces/types/AgentTrace';
 import type { SessionStatus } from '@/features/sessions/types/SessionStatus';
@@ -74,7 +74,9 @@ export const useAgentTrace = (sessionId: string, active: boolean) => {
         }
       });
   }, [schedule, sessionId]);
-  loadRef.current = load;
+  useLayoutEffect(() => {
+    loadRef.current = load;
+  }, [load]);
 
   // A different session starts from nothing; responses for the previous one are dropped.
   useEffect(() => {

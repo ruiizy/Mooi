@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef } from 'react';
 import type { TraceNode } from '@/features/traces/types/TraceNode';
 
 export interface TraceKeyboardOptions {
@@ -28,7 +28,9 @@ const isEditable = (target: EventTarget | null): boolean =>
  */
 export const useTraceKeyboard = (options: TraceKeyboardOptions): void => {
   const latest = useRef(options);
-  latest.current = options;
+  useLayoutEffect(() => {
+    latest.current = options;
+  });
 
   useEffect(() => {
     if (!options.enabled) return;

@@ -71,9 +71,14 @@ export const ChatPanel = ({
 
   const send = async (text: string, images: PreparedImage[] = []) => {
     setSending(true);
-    const sent = await onSend(text, images);
-    if (!sent) setSending(false);
-    return sent;
+    try {
+      const sent = await onSend(text, images);
+      if (!sent) setSending(false);
+      return sent;
+    } catch (failure) {
+      setSending(false);
+      throw failure;
+    }
   };
 
   return (

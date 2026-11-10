@@ -17,6 +17,7 @@ const MAX_RETRY_MS = 60_000;
  * player out; hidden tabs do nothing and renew on demand when used again.
  */
 export const useTokenRenewal = (): void => {
+  // react-doctor-disable-next-line react-doctor/effect-needs-cleanup -- false positive: the cleanup below clears the re-armed timer and `disposed` stops a renewal still in flight
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | null = null;
     let failures = 0;

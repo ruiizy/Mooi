@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef } from 'react';
 
 export type SwipeAxis = 'x' | 'y';
 
@@ -28,7 +28,9 @@ const LOCK_PX = 10;
  */
 export const useSwipeGestures = (element: HTMLElement | null, handlers: SwipeGestureHandlers): void => {
   const latest = useRef(handlers);
-  latest.current = handlers;
+  useLayoutEffect(() => {
+    latest.current = handlers;
+  });
 
   useEffect(() => {
     if (!element) return;

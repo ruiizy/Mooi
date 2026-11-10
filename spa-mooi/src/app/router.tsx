@@ -4,6 +4,7 @@ import { AppLayout } from '@/layouts/app/AppLayout';
 import { GuestRoute } from '@/shared/router/GuestRoute';
 import { ProtectedRoute } from '@/shared/router/ProtectedRoute';
 import { RoleRoute } from '@/shared/router/RoleRoute';
+import { RouteErrorBoundary } from '@/shared/components/RouteErrorBoundary';
 import { AccountPage } from '@/pages/AccountPage';
 import { AdminPage } from '@/pages/AdminPage';
 import { GithubCallbackPage } from '@/pages/GithubCallbackPage';
@@ -31,10 +32,12 @@ import { ProjectBackupPage } from '@/pages/ProjectBackupPage';
 export const router = createBrowserRouter([
   {
     element: <GuestRoute />,
+    errorElement: <RouteErrorBoundary />,
     children: [{ path: ROUTES.login, element: <LoginPage /> }],
   },
   {
     element: <ProtectedRoute />,
+    errorElement: <RouteErrorBoundary />,
     children: [
       {
         element: <AppLayout />,
