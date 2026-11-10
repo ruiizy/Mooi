@@ -1,0 +1,18 @@
+databaseChangeLog:
+  - changeSet:
+      id: 031-project-development-deployment
+      author: mooi
+      changes:
+        # No backfill: a root Compose file alone never proves a setup, so every project goes through
+        # the agent's deployment setup and its test once before Deploy runs directly.
+        - addColumn:
+            tableName: projects
+            columns:
+              - column:
+                  name: development_deployment_ready_at
+                  type: timestamp with time zone
+                  remarks: First time a dev deployment setup passed its test; NULL until then
+      rollback:
+        - dropColumn:
+            tableName: projects
+            columnName: development_deployment_ready_at

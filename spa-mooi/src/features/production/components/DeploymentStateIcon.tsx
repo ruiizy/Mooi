@@ -10,7 +10,7 @@ const VIEWS = {
 
 export const DeploymentStateIcon = ({ state, className }: { state: ProductionDeploymentState; className?: string }) => {
   const { icon: Icon, className: tone, spin } = VIEWS[state];
-  return <span className={cn('flex size-9 shrink-0 items-center justify-center rounded-[10px]', tone, className)}>
+  return <span className={cn('flex size-9 shrink-0 items-center justify-center rounded-control', tone, className)}>
     <Icon className={cn('size-4', spin && 'animate-spin')} />
   </span>;
 };

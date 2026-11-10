@@ -11,6 +11,7 @@ those carry information this service should forward verbatim.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from collections.abc import Awaitable, Callable
 from datetime import datetime
@@ -18,11 +19,13 @@ from uuid import UUID
 
 import httpx
 
-from mic_sessions.shared.auth import Caller
+from mic_sessions.shared.auth import Caller, verify_access_token
 from mic_sessions.shared.env import get_settings
 from mic_sessions.shared.web import ApiException, get_http_client
 
 _SERVICE_TOKEN_HEADER = "X-Service-Token"
+# Renewed this long before expiry, so a call started on a still valid token never lands on an expired one.
+_RENEWAL_MARGIN_SECONDS = 120
 
 
 @dataclass(frozen=True)
@@ -34,6 +37,8 @@ class Project:
     html_url: str
     # Player-declared in `mic-mooi`; only web applications may be deployed and previewed.
     web_application: bool
+    # Platform-owned: a development deployment setup passed its test, so sessions deploy directly.
+    development_deployment_ready: bool = False
 
 
 @dataclass(frozen=True)
@@ -46,6 +51,8 @@ class Credential:
     save: Callable[[str], Awaitable[None]] | None = field(default=None, repr=False)
     session_model: str | None = None
     session_effort: str | None = None
+    # The platform's default adapter for this provider; None is the provider's first one.
+    session_adapter: str | None = None
 
 
 @dataclass(frozen=True)
@@ -60,8 +67,9 @@ def _bearer(caller: Caller) -> dict[str, str]:
     return {"Authorization": f"Bearer {caller.token}"}
 
 
-def _service_headers(caller: Caller) -> dict[str, str]:
-    return {**_bearer(caller), _SERVICE_TOKEN_HEADER: get_settings().service_token}
+def _service_headers(caller: Caller | None) -> dict[str, str]:
+    """`None` is this service acting on its own behalf, for the endpoints no player token may reach."""
+    return {**(_bearer(caller) if caller else {}), _SERVICE_TOKEN_HEADER: get_settings().service_token}
 
 
 def _raise_for_status(response: httpx.Response, not_found_message: str) -> None:
@@ -104,6 +112,7 @@ async def fetch_project(caller: Caller, project_id: UUID) -> Project:
                 is_private=project["isPrivate"],
                 html_url=project["htmlUrl"],
                 web_application=bool(project.get("webApplication", False)),
+                development_deployment_ready=bool(project.get("developmentDeploymentReady", False)),
             )
     raise ApiException.not_found("Project not found")
 
@@ -164,15 +173,10 @@ async def write_production_recipe(caller: Caller, project_id: UUID, recipe: dict
     return response.json()
 
 
-async def publish_production_recipe(caller: Caller, project_id: UUID) -> dict:
-    try:
-        response = await get_http_client().post(
-            f"{get_settings().mooi_api_base_url}/me/projects/{project_id}/production/recipe/publish",
-            headers=_service_headers(caller))
-    except httpx.HTTPError:
-        raise ApiException.bad_gateway() from None
-    _raise_for_status(response, "Project not found")
-    return response.json()
+async def publish_production_recipe(project_id: UUID) -> dict:
+    """Service-only: runs once a deployment proves the draft, possibly after the player's access token expired."""
+    return await _send("POST", f"/internal/projects/{project_id}/production/recipe/publish", None,
+                       "Project not found") or {}
 
 
 async def delete_production_recipe(caller: Caller, project_id: UUID) -> None:
@@ -217,18 +221,22 @@ async def start_production_deployment(caller: Caller, project_id: UUID, operatio
     _raise_for_status(response, "Project not found")
 
 
-async def finish_production_deployment(caller: Caller, project_id: UUID, operation_id: UUID,
+async def finish_production_deployment(project_id: UUID, operation_id: UUID,
                                        state: str, message: str, logs: list[str]) -> None:
-    try:
-        response = await get_http_client().put(
-            f"{get_settings().mooi_api_base_url}/me/projects/{project_id}/production/deployments/{operation_id}",
-            headers=_service_headers(caller), json={"state": state, "message": message, "logs": logs})
-    except httpx.HTTPError:
-        raise ApiException.bad_gateway() from None
-    _raise_for_status(response, "Deployment not found")
+    """Service-only, so the outcome is saved even after the starting player's access token expired."""
+    await _send("PUT", f"/internal/projects/{project_id}/production/deployments/{operation_id}", None,
+                "Deployment not found", {"state": state, "message": message, "logs": logs})
 
 
-async def _send(method: str, path: str, caller: Caller, not_found_message: str, payload: dict | None = None) -> dict | None:
+async def reconcile_production_deployments(active: list[UUID]) -> int:
+    """Fails every unfinished deployment outside `active`: ones a restart of this service orphaned."""
+    body = await _send("POST", "/internal/production/deployments/reconcile", None, "Not found",
+                       {"active": [str(operation_id) for operation_id in active]})
+    return int((body or {}).get("interrupted", 0))
+
+
+async def _send(method: str, path: str, caller: Caller | None, not_found_message: str,
+                payload: dict | None = None) -> dict | None:
     """A service call that changes state in `mic-mooi`; answers its JSON body, or None when it has none."""
     try:
         response = await get_http_client().request(method, f"{get_settings().mooi_api_base_url}{path}",
@@ -239,7 +247,23 @@ async def _send(method: str, path: str, caller: Caller, not_found_message: str, 
     return response.json() if response.content else None
 
 
+async def renewed(caller: Caller) -> Caller:
+    """`caller` itself while its token stays valid, else a new token for the same sign-in. For callers
+    kept beyond their request (an agent's chat, a long run): `mic-mooi` refuses once the player signed
+    out or the sign-in reached its maximum lifetime, exactly as a refresh would."""
+    if caller.expires_at - time.time() > _RENEWAL_MARGIN_SECONDS:
+        return caller
+    body = await _send("POST", f"/internal/auth/sessions/{caller.session_id}/access-token", None,
+                       "Session is no longer active", {"playerId": str(caller.player_id)})
+    return verify_access_token((body or {})["accessToken"])
+
+
 # --- development: the environment every session of a project shares ---------------------------
+
+
+async def mark_development_deployment_ready(project_id: UUID) -> None:
+    """Service-only and idempotent: the setup's test may finish after the player's access token expired."""
+    await _send("PUT", f"/internal/projects/{project_id}/development/deployment/ready", None, "Project not found")
 
 
 async def fetch_development_environment(caller: Caller, project_id: UUID) -> dict[str, str]:
@@ -256,6 +280,19 @@ async def write_development_environment(caller: Caller, project_id: UUID, values
     return [str(name) for name in (payload or {}).get("environment") or []]
 
 
+# --- to-dos: the project's docs/TODOS.md, read and committed on its default branch -------------
+
+
+async def fetch_todos(caller: Caller, project_id: UUID) -> dict:
+    return await _get(get_http_client(), f"{get_settings().mooi_api_base_url}/me/projects/{project_id}/todos",
+                      _service_headers(caller), "Project not found")
+
+
+async def write_todos(caller: Caller, project_id: UUID, todos: dict) -> dict:
+    """Commits the whole list against the revision the caller read; a stale one answers 409."""
+    return await _send("PUT", f"/me/projects/{project_id}/todos", caller, "Project not found", todos) or {}
+
+
 # --- backups: configuration and durable records ------------------------------------------------
 
 
@@ -268,8 +305,10 @@ async def write_backup_recipe(caller: Caller, project_id: UUID, recipe: dict) ->
     return await _send("PUT", f"/me/projects/{project_id}/backups/recipe/draft", caller, "Project not found", recipe)
 
 
-async def publish_backup_recipe(caller: Caller, project_id: UUID) -> dict:
-    return await _send("POST", f"/me/projects/{project_id}/backups/recipe/publish", caller, "Project not found")
+async def publish_backup_recipe(project_id: UUID) -> dict:
+    """Service-only: runs once a restore proves the draft, possibly after the player's access token expired."""
+    return await _send("POST", f"/internal/projects/{project_id}/backups/recipe/publish", None,
+                       "Project not found") or {}
 
 
 async def delete_backup_recipe(caller: Caller, project_id: UUID) -> None:
@@ -313,10 +352,18 @@ async def start_backup_operation(caller: Caller, project_id: UUID, backup_id: UU
         "operationId": str(operation_id), "action": action, "target": target, "script": script})
 
 
-async def finish_backup_operation(caller: Caller, project_id: UUID, backup_id: UUID, operation_id: UUID,
+async def finish_backup_operation(project_id: UUID, backup_id: UUID, operation_id: UUID,
                                   state: str, message: str, logs: list[str]) -> None:
-    await _send("PUT", f"/me/projects/{project_id}/backups/{backup_id}/operations/{operation_id}", caller,
+    """Service-only, so the outcome is saved even after the starting player's access token expired."""
+    await _send("PUT", f"/internal/projects/{project_id}/backups/{backup_id}/operations/{operation_id}", None,
                 "Backup not found", {"state": state, "message": message, "logs": logs})
+
+
+async def reconcile_backup_operations(active: list[UUID]) -> int:
+    """Fails every unfinished backup operation outside `active`: ones a restart of this service orphaned."""
+    body = await _send("POST", "/internal/backups/operations/reconcile", None, "Not found",
+                       {"active": [str(operation_id) for operation_id in active]})
+    return int((body or {}).get("interrupted", 0))
 
 
 async def delete_backup(caller: Caller, project_id: UUID, backup_id: UUID) -> None:
@@ -368,6 +415,7 @@ async def fetch_agent_credential(caller: Caller, connection_id: str) -> Credenti
         connection_id=body.get("connectionId"),
         session_model=body.get("sessionModel"),
         session_effort=body.get("sessionEffort"),
+        session_adapter=body.get("sessionAdapter"),
         save=save if body["provider"] == "codex" else None,
         expires_at=datetime.fromisoformat(expires_at) if expires_at else None,
     )

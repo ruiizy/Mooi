@@ -57,15 +57,15 @@ export const AppUserMenu = ({ variant = 'compact', onNavigate }: AppUserMenuProp
           aria-expanded={isOpen}
           aria-label="Open the account menu"
           onClick={() => (isOpen ? close() : setOpen(true))}
-          className="flex w-full items-center gap-2.5 rounded-[10px] p-1.5 text-left transition hover:bg-surface-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand"
+          className="flex w-full items-center gap-2.5 rounded-control p-1.5 text-left transition-colors hover:bg-surface-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand"
         >
           <Avatar src={player.avatarUrl} name={player.username} size="sm" />
           <span className="min-w-0 flex-1">
-            <span className="block truncate text-[13px] font-bold text-ink">{player.username}</span>
+            <span className="block truncate text-[13px] font-medium text-ink">{player.username}</span>
             <span className="block truncate text-[11px] text-ink-subtle">{player.email}</span>
           </span>
           {player.role === 'admin' ? (
-            <span className="shrink-0 rounded-full bg-surface-2 px-1.5 py-0.5 text-[9px] font-extrabold tracking-[0.06em] text-ink-muted uppercase">
+            <span className="shrink-0 rounded-full border border-brand/25 bg-brand-soft px-1.5 py-px font-mono text-[9px] font-medium tracking-[0.08em] text-brand-strong uppercase">
               Admin
             </span>
           ) : null}
@@ -78,7 +78,7 @@ export const AppUserMenu = ({ variant = 'compact', onNavigate }: AppUserMenuProp
           aria-label="Open the account menu"
           onClick={() => (isOpen ? close() : setOpen(true))}
           className={cn(
-            'flex h-11 items-center gap-1 rounded-xl px-1 transition duration-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand',
+            'flex h-10 items-center gap-1 rounded-full py-1 pr-1.5 pl-1 transition-colors duration-150 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand',
             isOpen ? 'bg-surface-2' : 'hover:bg-surface-2',
           )}
         >
@@ -103,7 +103,7 @@ export const AppUserMenu = ({ variant = 'compact', onNavigate }: AppUserMenuProp
           role="menu"
           aria-label="Account"
           className={cn(
-            'absolute z-50 w-[min(17rem,calc(100vw-2rem))] max-h-[calc(100dvh-5rem)] overflow-y-auto animate-menu-in rounded-2xl border border-line bg-surface p-1.5 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.35)]',
+            'absolute z-50 w-[min(17rem,calc(100vw-2rem))] max-h-[calc(100dvh-5rem)] overflow-y-auto animate-menu-in rounded-xl border border-line bg-surface p-1 shadow-pop',
             isFull ? 'bottom-full left-0 mb-2 origin-bottom-left' : 'top-full right-0 mt-2 origin-top-right',
           )}
         >

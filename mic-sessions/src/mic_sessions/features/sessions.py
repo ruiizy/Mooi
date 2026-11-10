@@ -15,8 +15,9 @@ deployments themselves are project-scoped (see the production section): they run
 fetch only the selected release into a temporary checkout.
 
 Sessions and their event logs are memory-resident. After an ungraceful restart they cannot be
-resumed; marked on-disk session directories are reconciled at startup. `start_reaper()` closes idle sessions and `close_all()` closes sessions during a
-graceful shutdown; `main.py`'s lifespan owns calling both.
+resumed; marked on-disk session directories are reconciled at startup. Sessions never expire: whatever
+their state, they live until the user closes them (`DELETE /sessions/{id}`) or a graceful shutdown runs
+`close_all()`, which `main.py`'s lifespan owns calling.
 """
 
 from __future__ import annotations
@@ -32,10 +33,11 @@ import secrets
 import signal
 import tempfile
 import time
-from collections.abc import AsyncIterator, Callable, Coroutine, Iterable
+import zipfile
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -54,7 +56,7 @@ from pydantic import (
     model_validator,
 )
 
-from mic_sessions.shared import images, mooi, previews, workspaces
+from mic_sessions.shared import images, mooi, previews, traces, workspaces
 from mic_sessions.shared.agents import (
     PROVIDERS,
     RECOVERABLE_DETAIL,
@@ -89,7 +91,7 @@ from mic_sessions.shared.docker import (
     root_compose_file,
 )
 from mic_sessions.shared.env import backup_environment, development_environment, get_settings, production_environment
-from mic_sessions.shared.events import Event, EventLog, sse_frame, sse_heartbeat
+from mic_sessions.shared.events import Channels, Event, EventLog, event_stream, new_event
 from mic_sessions.shared.scripts import run_script
 from mic_sessions.shared.web import ApiException
 
@@ -98,6 +100,7 @@ LOG = logging.getLogger("sessions")
 _BRANCH_PATTERN = r"^[A-Za-z0-9._\-/]{1,120}$"
 _UNSET_PATH = Path()
 _LAST_EVENT_ID_HEADER = "Last-Event-ID"
+_USAGE_REFRESH_SECONDS = 60.0
 
 PENDING_KIND_PERMISSION = "permission"
 PENDING_KIND_QUESTION = "question"
@@ -228,6 +231,8 @@ _PLATFORM_KINDS = frozenset({"production", "backup"})
 class CreateSessionRequest(BaseModel):
     projectId: UUID
     provider: str
+    # The provider's implementation (e.g. Claude through its SDK or its CLI); its default when omitted.
+    adapter: str | None = Field(default=None, max_length=32)
     connectionId: UUID
     branch: str | None = Field(default=None, pattern=_BRANCH_PATTERN)
     model: str | None = None
@@ -338,6 +343,32 @@ class DevelopmentEnvironment(BaseModel):
     environment: list[DevelopmentEnvironmentVariable]
 
 
+TodoStatus = Literal["open", "inProgress", "done"]
+
+
+class TodoItem(BaseModel):
+    """One line of any length; `status` is written `[ ]`, `[/]` or `[x]` in docs/TODOS.md."""
+
+    text: str = Field(min_length=1)
+    status: TodoStatus = "open"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_done(cls, value: Any) -> Any:
+        # Agents briefed before item statuses existed still send `done`: read it as the status it meant.
+        if isinstance(value, dict) and "status" not in value and "done" in value:
+            return {**value, "status": "done" if value["done"] else "open"}
+        return value
+
+
+class TodosUpdate(BaseModel):
+    """The whole list, against the revision it was read at (null creates docs/TODOS.md)."""
+
+    revision: str | None = Field(default=None, max_length=128)
+    title: str | None = Field(default=None, max_length=200)
+    items: list[TodoItem] = Field(max_length=500)
+
+
 class AgentEnvironment(BaseModel):
     """What an agent reads: the project's own values. Server-wide defaults from .env belong to the
     operator, so only their names are listed."""
@@ -414,32 +445,33 @@ _SEMANTIC_TAG = re.compile(r"(v?)(\d+)\.(\d+)\.(\d+)")
 
 
 async def _next_release_tag(caller: Caller, project: mooi.Project) -> str:
-    """The patch after the highest semantic release, keeping its `v` prefix; v1.0.0 before any."""
+    """The minor after the highest semantic release (patch reset), keeping its `v` prefix; v1.0.0 before any."""
     releases = await _github_api(caller, project.full_name, "GET", "releases?per_page=100")
     versions = [match for item in releases if (match := _SEMANTIC_TAG.fullmatch(item.get("tag_name") or ""))]
     if not versions:
         return _FIRST_RELEASE_TAG
     latest = max(versions, key=lambda match: tuple(int(part) for part in match.groups()[1:]))
-    prefix, major, minor, patch = latest.groups()
-    return f"{prefix}{major}.{minor}.{int(patch) + 1}"
+    prefix, major, minor, _ = latest.groups()
+    return f"{prefix}{major}.{int(minor) + 1}.0"
 
 
 async def _test_release(caller: Caller, project: mooi.Project, fresh: bool) -> StartProductionRequest:
     """The release a chat tests with. `fresh` (repository changes were pushed since the last release)
     creates the next release on the default branch; otherwise the one currently deployed (latest
-    successful deployment) or, before any, v1.0.0 — created on the default branch when missing."""
+    successful deployment) or, before any, the latest published release — a new one (v1.0.0 before
+    any semantic release) is created on the default branch only when the repository has none."""
     if fresh:
         return StartProductionRequest(tag=await _next_release_tag(caller, project), create=True)
     deployed = await _current_release(caller, project.id)
     if deployed:
         return StartProductionRequest(tag=deployed)
     try:
-        await _github_api(caller, project.full_name, "GET", f"releases/tags/{_FIRST_RELEASE_TAG}")
+        latest = await _github_api(caller, project.full_name, "GET", "releases/latest")
     except ApiException as error:
         if error.status_code != status.HTTP_404_NOT_FOUND:
             raise
-        return StartProductionRequest(tag=_FIRST_RELEASE_TAG, create=True)
-    return StartProductionRequest(tag=_FIRST_RELEASE_TAG)
+        return StartProductionRequest(tag=await _next_release_tag(caller, project), create=True)
+    return StartProductionRequest(tag=latest["tag_name"])
 
 
 async def _current_release(caller: Caller, project_id: UUID) -> str | None:
@@ -487,6 +519,8 @@ class SessionPayload(BaseModel):
     provider: str
     connectionId: UUID
     providerLabel: str
+    adapter: str
+    adapterLabel: str
     branch: str
     baseBranch: str
     status: str
@@ -556,6 +590,10 @@ class AsideRequest(BaseModel):
     question: str = Field(min_length=1, max_length=10_000)
 
 
+class CompactSessionRequest(BaseModel):
+    instructions: str | None = Field(default=None, max_length=10_000)
+
+
 class UpdateSessionConfigurationRequest(BaseModel):
     # `model_fields_set` below distinguishes an omitted field from an explicit
     # null effort, which is how clients select a model with no effort setting.
@@ -603,6 +641,27 @@ class FileDiffPayload(BaseModel):
     # "text", or "binary" / "too_large" when the file has no readable diff.
     preview: Literal["text", "binary", "too_large"] = "text"
     truncated: bool = False
+
+
+class FilesPayload(BaseModel):
+    paths: list[str]
+    truncated: bool = False
+
+
+class FileContentPayload(BaseModel):
+    path: str
+    # "text", or "binary" / "too_large" when the file has nothing editable to show.
+    preview: Literal["text", "binary", "too_large"] = "text"
+    content: str = ""
+    revision: str = ""
+    size: int = 0
+
+
+class SaveFileRequest(BaseModel):
+    path: str
+    content: str
+    # The revision the editor read; the save is refused when the file moved on since.
+    baseRevision: str
 
 
 MergeState = Literal["clean", "conflicts", "up_to_date", "merged"]
@@ -657,6 +716,8 @@ class Session:
     log: EventLog
     runtime: AgentRuntime | None
     deployment: DeploymentSnapshot
+    # Observability over the provider's native logs, one entry per conversation (Trace tab).
+    trace: traces.SessionTrace = field(default_factory=traces.SessionTrace, repr=False)
     agent_token: str = field(default_factory=lambda: secrets.token_urlsafe(32), repr=False)
     # The agent acts for its session's latest caller on the token-guarded agent endpoints.
     agent_caller: Caller | None = field(default=None, repr=False)
@@ -670,13 +731,18 @@ class Session:
     production_release_pending: bool = False
     # A chat's own deployment setup conversation, if any (see `DeploymentSetup`).
     deployment_setup: DeploymentSetup | None = None
-    # Outcome of the latest start; None before any, when a root Compose file proves an earlier setup.
+    # Outcome of the latest start; None before any. A failed one hands the setup back to the agent.
     deployment_verified: bool | None = None
-    # The workspace holds a root Compose file, refreshed with its changes: the setup can be changed.
+    # The project's development deployment setup passed its test (here or in another of its sessions).
+    deployment_ready: bool = False
+    # Ready and the workspace holds a root Compose file, refreshed with its changes: Deploy runs it
+    # directly and the setup can be changed. A Compose file alone never proves a setup.
     deployment_configured: bool = False
     # Redacted output tail of the latest start, read by the agent that sets the deployment up.
     deployment_output: list[str] = field(default_factory=list)
     config: AgentConfig = field(default_factory=lambda: AgentConfig("", None))
+    # The provider adapter the agent runs on, fixed for the session's lifetime ("" is the default).
+    adapter: str = ""
     usage: dict[str, Any] = field(default_factory=dict)
     closing: bool = False
     turn_id: str | None = None
@@ -693,11 +759,14 @@ class Session:
     operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     deployment_task: asyncio.Task[None] | None = None
     deployment_monitor: asyncio.Task[None] | None = None
-    last_human_activity: datetime = field(default_factory=lambda: datetime.now(UTC))
-    activity_heartbeat_at: float | None = None
+    # Monotonic time before which a watched session does not refresh its account limits again.
+    usage_refresh_at: float = 0.0
+    # The usage the player's lists last received (see `_usage_signature`), so finer changes stay in the transcript.
+    usage_signature: tuple[Any, ...] | None = None
 
     def to_payload(self) -> SessionPayload:
         descriptor = describe(self.provider)
+        adapter = descriptor.adapter(self.adapter)
         return SessionPayload(
             id=self.id,
             kind=self.kind,
@@ -706,6 +775,8 @@ class Session:
             provider=self.provider,
             connectionId=self.connection_id,
             providerLabel=descriptor.label,
+            adapter=adapter.id,
+            adapterLabel=adapter.label,
             branch=self.branch,
             baseBranch=self.base_branch,
             status=self.status,
@@ -717,7 +788,7 @@ class Session:
             pending=PendingPayload(kind=self.pending.kind, requestId=self.pending.request_id)
             if self.pending is not None
             else None,
-            capabilities=descriptor.capabilities.as_payload(),
+            capabilities=adapter.capabilities.as_payload(),
             model=self.config.model,
             effort=self.config.effort,
             deployment=self.deployment,
@@ -762,7 +833,6 @@ def new_session(
         detail=None,
         created_at=now,
         updated_at=now,
-        last_human_activity=now,
         workspace=_UNSET_PATH,
         log=EventLog(),
         usage={"context": {"percent": None, "usedTokens": 0, "limitTokens": None,
@@ -814,6 +884,7 @@ class SessionRegistry:
             if owned >= settings.max_sessions_per_player:
                 raise ApiException.conflict("You have reached your session limit")
             self._sessions[session.id] = session
+        _announce(session)
 
     def get_for(self, caller: Caller, session_id: UUID) -> Session:
         """404 whether the session is missing or owned by another player — the same answer for
@@ -834,7 +905,10 @@ class SessionRegistry:
 
     async def remove(self, session_id: UUID) -> Session | None:
         async with self._lock:
-            return self._sessions.pop(session_id, None)
+            session = self._sessions.pop(session_id, None)
+        if session is not None:
+            _announce_removed(session)
+        return session
 
     def count(self) -> int:
         return len(self._sessions)
@@ -848,9 +922,6 @@ def get_registry() -> SessionRegistry:
     return SessionRegistry()
 
 
-_reaper_task: asyncio.Task[None] | None = None
-
-
 # --- the event fold ----------------------------------------------------------------------------
 
 
@@ -862,9 +933,9 @@ def record(session: Session, type_: str, data: dict[str, Any]) -> Event:
     derived here from the very events the SPA receives, so server and client can never disagree.
     Nothing else in this feature assigns `session.status` or `session.pending`.
 
+    Every change a session list shows is announced on the player's live channel as well.
     Deployment updates share sequence/replay with chat but never acquire a turnId, mutate chat
-    state or renew idle activity. Their payloads are validated before appending to the log.
-    Other events bump display `updated_at`; expiry uses the separate human activity clock.
+    state or bump `updated_at`. Their payloads are validated before appending to the log.
     Sync on purpose: everything runs on one event loop, so the runtime's pump task and the request
     handlers never interleave mid-function and no lock is needed.
     """
@@ -874,6 +945,7 @@ def record(session: Session, type_: str, data: dict[str, Any]) -> Event:
         session.deployment = snapshot
         if snapshot.state != "running":
             previews.withdraw(session.id)  # The preview path dies with the running state.
+        _announce(session)
         return event
     if type_ == EVENT_DEPLOYMENT_LOG:
         return session.log.append(type_, DeploymentLog.model_validate(data).model_dump(mode="json"))
@@ -884,8 +956,6 @@ def record(session: Session, type_: str, data: dict[str, Any]) -> Event:
         data = {**data, "recoverable": _recoverable(session)}
     event = session.log.append(type_, {**data, "turnId": session.turn_id})
     session.updated_at = event.at
-    if type_ == "message.user":
-        _touch_activity(session, event.at)
 
     if type_ == "session.usage":
         previous_quota = session.usage.get("quota")
@@ -935,6 +1005,9 @@ def record(session: Session, type_: str, data: dict[str, Any]) -> Event:
         )
 
     _observe_changes(session, type_, data)
+    if type_ in _SUMMARY_EVENTS or (type_ == "session.usage"
+                                    and _usage_signature(session.usage) != session.usage_signature):
+        _announce(session)
     return event
 
 
@@ -996,10 +1069,11 @@ def _observe_changes(session: Session, type_: str, data: dict[str, Any]) -> None
 
 
 def _sync_deployment_configured(session: Session) -> bool:
-    """Publishes whether the workspace holds a root Compose file whenever that changes."""
+    """Publishes whether the project's tested setup applies to the workspace's root Compose file
+    whenever that changes. The file system is only read once the project is ready."""
     if session.kind != "session" or session.workspace == _UNSET_PATH:
         return False
-    configured = root_compose_file(session.workspace) is not None
+    configured = session.deployment_ready and root_compose_file(session.workspace) is not None
     if configured != session.deployment_configured:
         record(session, EVENT_DEPLOYMENT_CONFIGURED, {"configured": configured})
     return configured
@@ -1163,7 +1237,7 @@ async def _close_registered_session(session: Session) -> None:
 
 async def close_session(session_id: UUID) -> None:
     """Closes and removes one registered session. Reused by `DELETE /sessions/{id}` and by the
-    idle reaper and shutdown hook, neither of which has a caller to check ownership against — that
+    shutdown hook, which has no caller to check ownership against — that
     check, when one is needed, is the caller's job before calling this."""
     registry = get_registry()
     session = registry.get(session_id)
@@ -1178,10 +1252,16 @@ async def create_session(
     body: CreateSessionRequest, caller: Annotated[Caller, Depends(current_caller)]
 ) -> SessionPayload:
     """Reserve a session immediately; provision it in a tracked background task."""
+    return (await _open_session(body, caller)).to_payload()
+
+
+async def _open_session(body: CreateSessionRequest, caller: Caller) -> Session:
+    """Opens any chat, from the UI or handed over by another chat's agent: the same path either way."""
     descriptor = describe(body.provider)
     registry = get_registry()
-    await descriptor.prepare(caller, str(body.connectionId))
-    config = descriptor.configure(body.model, body.effort)
+    # No adapter requested (an agent's handover, an older client) is the platform's default adapter.
+    adapter = await descriptor.prepare(caller, str(body.connectionId), adapter=body.adapter)
+    config = descriptor.configure(body.model, body.effort, adapter.id)
     if body.kind == "session":
         if body.branch is None:
             raise ApiException.bad_request("A branch is required for a session")
@@ -1205,10 +1285,12 @@ async def create_session(
     )
 
     session.config = config
+    session.adapter = adapter.id
     session.agent_caller = caller
     project = await mooi.fetch_project(caller, body.projectId)
     session.project_full_name = project.full_name
     session.base_branch = project.default_branch
+    session.deployment_ready = project.development_deployment_ready
     if session.kind in _PLATFORM_KINDS:
         session.branch = project.default_branch
         session.platform_baseline = (await _production_documents(caller, body.projectId)).active \
@@ -1216,7 +1298,7 @@ async def create_session(
     await registry.add(session)
     _record_status(session, STATUS_PROVISIONING, "Preparing the workspace")
     _spawn(session, _provision(session, caller, project, body.initialMessage))
-    return session.to_payload()
+    return session
 
 
 async def _provision(session: Session, caller: Caller, project: mooi.Project,
@@ -1239,7 +1321,7 @@ async def _provision(session: Session, caller: Caller, project: mooi.Project,
         session.base_commit = workspace.base_commit
         _sync_deployment_configured(session)
 
-        _record_status(session, STATUS_PROVISIONING, f"Starting {descriptor.label}")
+        _record_status(session, STATUS_PROVISIONING, f"Starting {descriptor.adapter(session.adapter).label}")
         runtime = create_runtime(
             descriptor.id,
             credential,
@@ -1248,10 +1330,12 @@ async def _provision(session: Session, caller: Caller, project: mooi.Project,
             _emitter(session),
             _asker(session),
             session.config,
+            adapter=session.adapter,
             instructions=_session_instructions(session),
             environment=_session_environment(session),
         )
         session.runtime = runtime
+        session.trace.follow(runtime.trace_sources)
         await runtime.start()
 
         if session.closing:
@@ -1279,10 +1363,12 @@ async def _provision(session: Session, caller: Caller, project: mooi.Project,
 
 @router.get("/sessions/providers/{provider}")
 async def session_provider(provider: str, connectionId: UUID,
-                           caller: Annotated[Caller, Depends(current_caller)], refresh: bool = False) -> dict[str, Any]:
+                           caller: Annotated[Caller, Depends(current_caller)], refresh: bool = False,
+                           adapter: str | None = None) -> dict[str, Any]:
+    """The model catalog of one provider adapter (the platform's default when omitted) and its adapters."""
     descriptor = describe(provider)
-    await descriptor.prepare(caller, str(connectionId), refresh=refresh)
-    return descriptor.configuration()
+    prepared = await descriptor.prepare(caller, str(connectionId), refresh=refresh, adapter=adapter)
+    return descriptor.configuration(prepared.id)
 
 
 @router.get("/sessions/workspaces")
@@ -1351,83 +1437,279 @@ async def stream_session_events(
     caller: Annotated[Caller, Depends(current_caller)],
     after: int = 0,
 ) -> StreamingResponse:
-    """Live tail of the session's event log.
-
-    Subscribes *before* replaying: `EventLog.subscribe` registers its queue synchronously, so any
-    event appended between that call and `replay()` lands in the queue instead of being lost, and
-    is simply skipped as a duplicate once the live loop reaches it — its `seq` is not greater than
-    the last replayed one. `Last-Event-ID` is accepted as a fallback for `after`.
-    """
+    """Live tail of the session's event log: the events after `after` (or `Last-Event-ID`), a
+    `session.sync` snapshot that also carries what replay may have lost (the current deployment, the
+    pending interactions), then live events. An expired cursor first gets an explicit `history.reset`."""
     session = get_registry().get_for(caller, session_id)
     last_event_id = request.headers.get(_LAST_EVENT_ID_HEADER)
     if last_event_id is not None:
         with suppress(ValueError):
             after = int(last_event_id)
-
-    settings = get_settings()
     queue = session.log.subscribe()
+    opening: list[Event] = []
+    if after < session.log.first_seq - 1 or after > session.log.last_seq:
+        after = session.log.first_seq - 1
+        opening.append(new_event(after, "history.reset", {
+            "message": "Earlier trace events are no longer retained in memory. Showing available history."}))
+    opening.extend(session.log.replay(after))
+    opening.append(new_event(session.log.last_seq, "session.sync", {
+        "session": session.to_payload().model_dump(mode="json"),
+        "pending": list(session.interactions.values()),
+    }))
+    return event_stream(request, queue, opening, after=after, authorize=current_caller,
+                        close=lambda: session.log.unsubscribe(queue), tick=lambda: _refresh_visible_usage(session))
 
-    async def frames() -> AsyncIterator[str]:
+
+def _refresh_visible_usage(session: Session) -> None:
+    """Account limits move with other sessions and devices: while someone watches a live session,
+    refresh them at most once a minute per session, however many viewers it has."""
+    now = time.monotonic()
+    if (session.runtime is None or now < session.usage_refresh_at
+            or session.status not in (STATUS_READY, STATUS_WORKING, STATUS_WAITING)):
+        return
+    session.usage_refresh_at = now + _USAGE_REFRESH_SECONDS
+    runtime = session.runtime
+
+    async def refresh() -> None:
         try:
-            last_seq = after
-            replay = session.log.replay(after)
-            # Includes the current deployment even when its update has fallen out of replay.
-            sync = Event(session.log.last_seq, datetime.now(UTC), "session.sync", {
-                "session": session.to_payload().model_dump(mode="json"),
-                "pending": list(session.interactions.values()),
-            })
-            if after < session.log.first_seq - 1 or after > session.log.last_seq:
-                last_seq = session.log.first_seq - 1
-                replay = session.log.replay(last_seq)
-                yield sse_frame(Event(last_seq, datetime.now(UTC), "history.reset", {
-                    "message": "Earlier trace events are no longer retained in memory. Showing available history."
-                }))
-            for event in replay:
-                yield sse_frame(event)
-                last_seq = event.seq
-            yield sse_frame(sync)
-            last_seq = sync.seq
-            next_usage_check = 0.0
-            next_auth_check = time.monotonic()
-            while True:
-                if time.monotonic() >= next_auth_check:
-                    try:
-                        await current_caller(request)
-                    except Exception:
-                        LOG.debug("Background operation encountered an exception", exc_info=True)
-                        return
-                    next_auth_check = time.monotonic() + settings.introspection_cache_seconds
-                if await request.is_disconnected():
-                    return
-                if time.monotonic() >= next_usage_check:
-                    next_usage_check = time.monotonic() + 60
-                    if session.runtime is not None and session.status in (STATUS_READY, STATUS_WORKING, STATUS_WAITING):
-                        try:
-                            await session.runtime.refresh_usage()
-                        except Exception:
-                            LOG.debug("Visible session usage refresh unavailable")
-                try:
-                    event = await asyncio.wait_for(queue.get(), settings.sse_heartbeat_seconds)
-                except TimeoutError:
-                    yield sse_heartbeat()
-                    continue
-                if event is None:
-                    return
-                if event.seq > last_seq:
-                    yield sse_frame(event)
-                    last_seq = event.seq
-        finally:
-            session.log.unsubscribe(queue)
+            await runtime.refresh_usage()
+        except Exception:
+            LOG.debug("Visible session usage refresh unavailable", exc_info=True)
 
-    return StreamingResponse(
-        frames(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-            "Connection": "keep-alive",
-        },
-    )
+    _spawn(session, refresh())
+
+
+# --- the player's live channel -------------------------------------------------------------------
+#
+# Everything live outside a session transcript reaches the browser through one stream per player:
+# session summaries for every list, production and backup operations with their console output, and
+# configuration and environment changes made from any side (buttons, another device or an agent).
+# Publishers never check whether anyone listens: an unwatched channel costs nothing.
+
+_channels = Channels()
+_announced: set[UUID] = set()
+
+EVENT_SESSION_UPDATED = "session.updated"
+EVENT_SESSION_REMOVED = "session.removed"
+EVENT_DEVELOPMENT_ENVIRONMENT = "development.environment"
+EVENT_PROJECT_TODOS = "project.todos"
+# Session events that change what a session list shows; anything else stays in the transcript.
+_SUMMARY_EVENTS = frozenset({
+    EVENT_SESSION_STATUS, EVENT_PERMISSION_REQUEST, EVENT_QUESTION_REQUEST, EVENT_PERMISSION_RESOLVED,
+    EVENT_QUESTION_RESOLVED, EVENT_TURN_RESULT, EVENT_SESSION_CONFIGURATION, EVENT_SESSION_CLEARED,
+    EVENT_DEPLOYMENT_UPDATED, "deployment.setup", "deployment.configured", "merge.completed",
+})
+
+
+def _usage_signature(usage: dict[str, Any]) -> tuple[Any, ...]:
+    """What a session list shows of the usage: whole percents and window states. Context moves on
+    every streamed message; only a change the lists can display is worth a summary."""
+    def metric(value: Any) -> tuple[Any, ...] | None:
+        if not isinstance(value, dict):
+            return None
+        percent = value.get("percent")
+        shown = round(percent) if isinstance(percent, (int, float)) else None
+        return shown, value.get("status"), value.get("resetsAt")
+
+    quota = usage.get("quota")
+    windows = (tuple(sorted((str(name), metric(value)) for name, value in quota.items()))
+               if isinstance(quota, dict) else None)
+    return metric(usage.get("context")), windows
+
+
+def _announce(session: Session) -> None:
+    """Publishes the session's summary once per event-loop iteration, however many events changed it.
+    Nobody watching the player's channel means nothing is built: the next `sync` carries the state."""
+    if session.id in _announced:
+        return
+    _announced.add(session.id)
+
+    def flush() -> None:
+        _announced.discard(session.id)
+        session.usage_signature = _usage_signature(session.usage)
+        if get_registry().get(session.id) is not session:
+            return
+        if _channels.watched(session.player_id):
+            _channels.publish(session.player_id, EVENT_SESSION_UPDATED, session.to_payload().model_dump(mode="json"))
+        if _channels.watched(_ADMIN_CHANNEL):
+            _channels.publish(_ADMIN_CHANNEL, EVENT_ADMIN_SESSION, _admin_session_payload(session))
+
+    asyncio.get_running_loop().call_soon(flush)
+
+
+def _announce_removed(session: Session) -> None:
+    _channels.publish(session.player_id, EVENT_SESSION_REMOVED,
+                      {"sessionId": str(session.id), "projectId": str(session.project_id)})
+    _channels.publish(_ADMIN_CHANNEL, EVENT_ADMIN_SESSION_REMOVED,
+                      {"sessionId": str(session.id), "playerId": str(session.player_id)})
+
+
+# Monotonic time before which a watched player channel does not look for stale account limits again.
+_player_usage_refresh_at: dict[UUID, float] = {}
+
+
+def _refresh_listed_usage(player_id: UUID) -> None:
+    """Account limits move with every session and device on the account: while the player's lists are
+    open, refresh them through one live session per account, at most once a minute. Sessions of the
+    same account share the reading, so one refresh keeps every row of that account current."""
+    now = time.monotonic()
+    if now < _player_usage_refresh_at.get(player_id, 0.0):
+        return
+    _player_usage_refresh_at[player_id] = now + _USAGE_REFRESH_SECONDS
+    chosen: dict[UUID, Session] = {}
+    for session in get_registry().list_for(player_id, None):
+        if session.runtime is None or session.status not in (STATUS_READY, STATUS_WORKING, STATUS_WAITING):
+            continue
+        current = chosen.get(session.connection_id)
+        # The one refreshed least recently is the one whose throttle lets it through.
+        if current is None or session.usage_refresh_at < current.usage_refresh_at:
+            chosen[session.connection_id] = session
+    for session in chosen.values():
+        _refresh_visible_usage(session)
+
+
+@router.get("/events")
+async def stream_player_events(request: Request, caller: Annotated[Caller, Depends(current_caller)]) -> StreamingResponse:
+    """The player's live channel: a `sync` snapshot of every session, production and backup operation
+    they own in this process, then live events. Reconnecting simply starts from a fresh `sync`."""
+    player_id = caller.player_id
+    queue = _channels.subscribe(player_id)
+    sync = _channels.snapshot("sync", {
+        "sessions": [session.to_payload().model_dump(mode="json") for session in get_registry().list_for(player_id, None)],
+        "production": [_operation_payload(run) for run in _production_runs.values() if run.player_id == player_id],
+        "backups": [_operation_payload(run) for run in _backup_runs.values() if run.player_id == player_id],
+    })
+
+    _publish_presence(player_id)
+
+    def close() -> None:
+        _channels.unsubscribe(player_id, queue)
+        if not _channels.watched(player_id):
+            _player_usage_refresh_at.pop(player_id, None)
+        _publish_presence(player_id)
+
+    return event_stream(request, queue, [sync], after=0, authorize=current_caller, close=close,
+                        tick=lambda: _refresh_listed_usage(player_id))
+
+
+# --- administration ------------------------------------------------------------------------------
+#
+# Administrators follow the whole platform live through one more key of the same `Channels`: who is
+# connected (a player is online while at least one of their devices holds the live channel above,
+# which the app keeps open for its whole shell) and every live chat, as a compact summary. Publishers
+# only build that summary while an administrator watches, so an unwatched console costs nothing.
+# Identity actions (sign out everywhere, ban) belong to mic-mooi; closing chats belongs here.
+
+_ADMIN_CHANNEL = "admin"
+EVENT_ADMIN_PRESENCE = "admin.presence"
+EVENT_ADMIN_SESSION = "admin.session"
+EVENT_ADMIN_SESSION_REMOVED = "admin.session.removed"
+
+
+class AdminSessionPayload(BaseModel):
+    """What the administrators' directory shows of one live chat: no transcript, usage or workspace."""
+
+    id: UUID
+    playerId: UUID
+    kind: SessionKind
+    projectId: UUID
+    projectFullName: str
+    branch: str
+    providerLabel: str
+    adapterLabel: str
+    model: str
+    effort: str | None
+    status: str
+    pending: bool
+    deploymentState: DeploymentState
+    createdAt: datetime
+    updatedAt: datetime
+
+
+class AdminClosedSessions(BaseModel):
+    closed: int
+
+
+async def current_admin(request: Request) -> Caller:
+    """Administrators only. The role is a claim of the signed access token, whose sign-in
+    `current_caller` has just checked is still alive (a banned player's is not)."""
+    caller = await current_caller(request)
+    if caller.role != "admin":
+        raise ApiException.forbidden("Insufficient role")
+    return caller
+
+
+def _admin_session_payload(session: Session) -> dict[str, Any]:
+    descriptor = describe(session.provider)
+    return AdminSessionPayload(
+        id=session.id,
+        playerId=session.player_id,
+        kind=session.kind,
+        projectId=session.project_id,
+        projectFullName=session.project_full_name,
+        branch=session.branch,
+        providerLabel=descriptor.label,
+        adapterLabel=descriptor.adapter(session.adapter).label,
+        model=session.config.model,
+        effort=session.config.effort,
+        status=session.status,
+        pending=session.pending is not None,
+        deploymentState=session.deployment.state,
+        createdAt=session.created_at,
+        updatedAt=session.updated_at,
+    ).model_dump(mode="json")
+
+
+def _publish_presence(player_id: UUID) -> None:
+    if _channels.watched(_ADMIN_CHANNEL):
+        _channels.publish(_ADMIN_CHANNEL, EVENT_ADMIN_PRESENCE,
+                          {"playerId": str(player_id), "connections": _channels.subscriber_count(player_id)})
+
+
+@router.get("/admin/events")
+async def stream_admin_events(request: Request,
+                              caller: Annotated[Caller, Depends(current_admin)]) -> StreamingResponse:
+    """The administrators' live channel: a `sync` snapshot of who is connected (devices per player)
+    and of every live chat in this process, then presence and chat changes as they happen."""
+    queue = _channels.subscribe(_ADMIN_CHANNEL)
+    presence = _channels.subscribers()
+    sync = _channels.snapshot("sync", {
+        "presence": {str(key): count for key, count in presence.items() if isinstance(key, UUID)},
+        "sessions": [_admin_session_payload(session) for session in get_registry().all()],
+    })
+    return event_stream(request, queue, [sync], after=0, authorize=current_admin,
+                        close=lambda: _channels.unsubscribe(_ADMIN_CHANNEL, queue))
+
+
+@router.get("/admin/agents/providers")
+async def admin_agent_providers(caller: Annotated[Caller, Depends(current_admin)]) -> dict[str, Any]:
+    """Every provider and its adapters (the first is the built-in default), for the platform defaults."""
+    return {"providers": [
+        {"id": provider.id, "label": provider.label,
+         "adapters": [{"id": adapter.id, "label": adapter.label} for adapter in provider.adapters]}
+        for provider in PROVIDERS.values()
+    ]}
+
+
+@router.delete("/admin/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def admin_close_session(session_id: UUID, caller: Annotated[Caller, Depends(current_admin)]) -> None:
+    """Closes any player's chat exactly as its owner would; always `204`, like the owner's own close."""
+    session = get_registry().get(session_id)
+    if session is None:
+        return
+    LOG.info("Admin %s closes session %s of player %s", caller.player_id, session_id, session.player_id)
+    await close_session(session_id)
+
+
+@router.delete("/admin/players/{player_id}/sessions")
+async def admin_close_player_sessions(
+    player_id: UUID, caller: Annotated[Caller, Depends(current_admin)]
+) -> AdminClosedSessions:
+    """Closes every chat of one player at once, e.g. alongside a ban."""
+    sessions = get_registry().list_for(player_id, None)
+    LOG.info("Admin %s closes %d sessions of player %s", caller.player_id, len(sessions), player_id)
+    await asyncio.gather(*(close_session(session.id) for session in sessions))
+    return AdminClosedSessions(closed=len(sessions))
 
 
 @router.post("/sessions/{session_id}/messages", status_code=status.HTTP_202_ACCEPTED)
@@ -1438,7 +1720,7 @@ async def send_message(
     session.agent_caller = caller
     if not body.text.strip() and not body.images:
         raise ApiException.bad_request("Message cannot be blank")
-    if body.images and not describe(session.provider).capabilities.images:
+    if body.images and not describe(session.provider).adapter(session.adapter).capabilities.images:
         raise ApiException.bad_request("This agent does not accept images")
     async with session.operation_lock:
         if session.status != STATUS_READY or session.closing or session.deployment.state == "starting":
@@ -1508,14 +1790,14 @@ async def ask_aside(
     question = body.question.strip()
     if not question:
         raise ApiException.bad_request("The side question cannot be blank")
-    if not describe(session.provider).capabilities.asides:
+    if not describe(session.provider).adapter(session.adapter).capabilities.asides:
         raise ApiException.bad_request("This agent does not answer side questions")
     if session.closing or session.status not in _ASIDE_STATUSES:
         raise ApiException.conflict("The session cannot answer side questions right now")
     if session.asides:
         raise ApiException.conflict("A side question is already being answered")
     runtime = _runtime(session)
-    _touch_activity(session)
+    _touch(session)
 
     def line(payload: dict[str, Any]) -> str:
         return json.dumps(payload) + "\n"
@@ -1549,7 +1831,7 @@ async def recover_session(session_id: UUID, caller: Annotated[Caller, Depends(cu
             raise ApiException.conflict("Only a failed session can be reconnected")
         if not _recoverable(session):
             raise ApiException.conflict("This session cannot be recovered. Start a new one.")
-        _touch_activity(session)
+        _touch(session)
         try:
             await _runtime(session).recover()
         except Exception:
@@ -1586,7 +1868,7 @@ async def update_session_configuration(
 ) -> SessionPayload:
     session = get_registry().get_for(caller, session_id)
     descriptor = describe(session.provider)
-    await descriptor.prepare(caller, str(session.connection_id))
+    await descriptor.prepare(caller, str(session.connection_id), adapter=session.adapter)
     async with session.operation_lock:
         if (session.closing or session.deployment.state == "starting"
                 or session.status not in (STATUS_PROVISIONING, STATUS_READY, STATUS_WORKING, STATUS_WAITING)):
@@ -1602,10 +1884,10 @@ async def update_session_configuration(
         effort = body.effort if "effort" in changed_fields else (
             None if model != session.config.model else session.config.effort
         )
-        candidate = descriptor.configure(model, effort)
+        candidate = descriptor.configure(model, effort, session.adapter)
         # Never touch a running turn or a runtime still being provisioned.
         # send_message applies the latest selection under this same lock.
-        _touch_activity(session)
+        _touch(session)
         _record_event(session, session_configuration(candidate.model, candidate.effort))
         return session.to_payload()
 
@@ -1618,7 +1900,7 @@ async def interrupt_session(session_id: UUID, caller: Annotated[Caller, Depends(
         if session.status not in (STATUS_WORKING, STATUS_WAITING) or session.closing:
             raise ApiException.conflict("There is no active turn to interrupt")
         await _runtime(session).interrupt()
-        _touch_activity(session)
+        _touch(session)
 
 
 @router.post("/sessions/{session_id}/clear", status_code=status.HTTP_204_NO_CONTENT)
@@ -1630,33 +1912,37 @@ async def clear_session_conversation(
         if session.status != STATUS_READY or session.closing or session.deployment.state == "starting":
             raise ApiException.conflict("The session is not ready to clear its conversation")
         await _reset_conversation(session, caller)
-        _touch_activity(session)
+        _touch(session)
 
 
 @router.post("/sessions/{session_id}/compact", status_code=status.HTTP_202_ACCEPTED)
 async def compact_session_conversation(
-    session_id: UUID, caller: Annotated[Caller, Depends(current_caller)]
+    session_id: UUID, caller: Annotated[Caller, Depends(current_caller)],
+    body: CompactSessionRequest | None = None,
 ) -> None:
     session = get_registry().get_for(caller, session_id)
     async with session.operation_lock:
         if session.status != STATUS_READY or session.closing or session.deployment.state == "starting":
             raise ApiException.conflict("The session is not ready to compact its conversation")
         _runtime(session)
-        _touch_activity(session)
+        _touch(session)
         previous_context = session.usage.get("context")
         record(session, EVENT_SESSION_COMPACTION, {"phase": "started"})
         _record_status(session, STATUS_COMPACTING)
         record(session, "session.usage", {"context": None})
-        _spawn(session, _run_compaction(session, previous_context))
+        instructions = ((body.instructions or "").strip() or None) if body else None
+        _spawn(session, _run_compaction(session, previous_context, instructions))
 
 
-async def _run_compaction(session: Session, previous_context: dict[str, Any] | None) -> None:
+async def _run_compaction(
+    session: Session, previous_context: dict[str, Any] | None, instructions: str | None = None,
+) -> None:
     """Own the long provider operation after the HTTP request has returned."""
     async with session.operation_lock:
         if session.closing or session.status != STATUS_COMPACTING:
             return
         try:
-            await _runtime(session).compact()
+            await _runtime(session).compact(instructions)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -1684,7 +1970,7 @@ async def resolve_permission(
     if pending is None or pending["kind"] != "permission":
         raise ApiException.not_found("Unknown permission request")
     await _runtime(session).resolve(request_id, body.model_dump())
-    _touch_activity(session)
+    _touch(session)
 
 
 @router.post("/sessions/{session_id}/questions/{request_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -1709,7 +1995,7 @@ async def resolve_question(
         if any(not value.strip() for value in values):
             raise ApiException.bad_request("Answers cannot be blank")
     await _runtime(session).resolve(request_id, body.model_dump())
-    _touch_activity(session)
+    _touch(session)
 
 
 @router.get("/sessions/{session_id}/changes")
@@ -1730,6 +2016,130 @@ async def get_changes(session_id: UUID, caller: Annotated[Caller, Depends(curren
             return _changes_error_payload(session)
 
 
+@router.get("/sessions/{session_id}/trace", response_model=None)
+async def get_trace(
+    session_id: UUID, caller: Annotated[Caller, Depends(current_caller)], revision: str | None = None
+) -> dict[str, Any] | Response:
+    """The session's agent trace; `204` while `revision` is still the current one."""
+    session = get_registry().get_for(caller, session_id)
+    live = session.status in (STATUS_WORKING, STATUS_WAITING, STATUS_COMPACTING)
+    snapshot = await session.trace.snapshot(live=live)
+    if revision is not None and snapshot.get("revision") == revision:
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    return snapshot
+
+
+@router.get("/sessions/{session_id}/trace/spans/{span_id:path}")
+async def get_trace_span(
+    session_id: UUID, span_id: str, caller: Annotated[Caller, Depends(current_caller)]
+) -> dict[str, Any]:
+    """Full input, output and metadata of one trace span."""
+    session = get_registry().get_for(caller, session_id)
+    detail = await session.trace.detail(span_id)
+    if detail is None:
+        raise ApiException.not_found("Span not found")
+    return detail
+
+
+# Bytes read per chunk when streaming raw trace logs.
+_TRACE_LOG_CHUNK = 256 * 1024
+
+
+def _trace_log_directory(session: Session) -> Path | None:
+    """Where an archived conversation keeps its raw logs: inside the owned session directory, so they are
+    removed with the workspace and never reach the checkout."""
+    return None if session.workspace == _UNSET_PATH else session.workspace.parent / "trace-logs"
+
+
+class _ZipStream:
+    """A write-only sink for `zipfile` (which supports unseekable output) whose bytes are drained per chunk."""
+
+    def __init__(self) -> None:
+        self._chunks: list[bytes] = []
+        self._written = 0
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, data: bytes) -> int:
+        self._chunks.append(bytes(data))
+        self._written += len(data)
+        return len(data)
+
+    def tell(self) -> int:
+        return self._written
+
+    def flush(self) -> None:
+        pass
+
+    def drain(self) -> bytes:
+        data, self._chunks = b"".join(self._chunks), []
+        return data
+
+
+def _read_snapshot(handle: Any) -> Iterable[bytes]:
+    """The open file up to its size now: a live log keeps growing, a download stops at a whole snapshot."""
+    remaining = os.fstat(handle.fileno()).st_size
+    while remaining > 0:
+        chunk = handle.read(min(_TRACE_LOG_CHUNK, remaining))
+        if not chunk:
+            break
+        remaining -= len(chunk)
+        yield chunk
+
+
+def _stream_file(path: Path) -> Iterable[bytes]:
+    with path.open("rb") as handle:
+        yield from _read_snapshot(handle)
+
+
+def _stream_zip(files: Sequence[tuple[str, Path]]) -> Iterable[bytes]:
+    """One `.zip` built while it is sent (deflated, relative names kept): memory stays about one chunk."""
+    sink = _ZipStream()
+    with zipfile.ZipFile(sink, "w", compression=zipfile.ZIP_DEFLATED) as archive:  # type: ignore[arg-type]
+        for name, path in files:
+            try:
+                handle = path.open("rb")
+            except OSError:
+                LOG.warning("Trace log %s disappeared before its download", name)
+                continue
+            with handle, archive.open(name, "w", force_zip64=True) as entry:
+                for chunk in _read_snapshot(handle):
+                    entry.write(chunk)
+                    if data := sink.drain():
+                        yield data
+            if data := sink.drain():
+                yield data
+    if data := sink.drain():
+        yield data
+
+
+@router.get("/sessions/{session_id}/trace/logs", response_model=None)
+async def download_trace_logs(
+    session_id: UUID, caller: Annotated[Caller, Depends(current_caller)]
+) -> StreamingResponse:
+    """The raw agent session logs the trace is built from (Claude Code transcripts with their sub-agent
+    files, Codex rollouts): the one file as-is, or every file in one `.zip` keeping relative paths."""
+    session = get_registry().get_for(caller, session_id)
+    files = await session.trace.log_files()
+    if not files:
+        raise ApiException.not_found("This conversation has no agent log to download yet")
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    stem = f"mooi-trace-{str(session.id)[:8]}-{stamp}"
+    if len(files) == 1:
+        name, path = files[0]
+        suffix = Path(name).suffix or ".log"
+        filename = f"{stem}{suffix}"
+        media_type = "application/x-ndjson" if suffix == ".jsonl" else "application/json"
+        body: Iterable[bytes] = _stream_file(path)
+    else:
+        filename, media_type, body = f"{stem}.zip", "application/zip", _stream_zip(files)
+    return StreamingResponse(
+        body, media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"', "Cache-Control": "no-store"},
+    )
+
+
 @router.get("/sessions/{session_id}/changes/file")
 async def get_file_diff(
     session_id: UUID, path: str, caller: Annotated[Caller, Depends(current_caller)]
@@ -1741,6 +2151,45 @@ async def get_file_diff(
         diff = await workspaces.file_diff(session.workspace, session.base_commit, path)
         return FileDiffPayload(path=path, diff=diff.diff, preview=diff.preview, truncated=diff.truncated)
 
+
+
+@router.get("/sessions/{session_id}/files")
+async def get_files(session_id: UUID, caller: Annotated[Caller, Depends(current_caller)]) -> FilesPayload:
+    session = get_registry().get_for(caller, session_id)
+    if session.workspace == _UNSET_PATH:
+        return FilesPayload(paths=[])
+    listing = await workspaces.list_files(session.workspace)
+    return FilesPayload(paths=listing.paths, truncated=listing.truncated)
+
+
+@router.get("/sessions/{session_id}/files/content")
+async def get_file_content(
+    session_id: UUID, path: str, caller: Annotated[Caller, Depends(current_caller)]
+) -> FileContentPayload:
+    session = get_registry().get_for(caller, session_id)
+    if session.workspace == _UNSET_PATH:
+        raise ApiException.conflict("The workspace is still being prepared")
+    file = await workspaces.read_file(session.workspace, path)
+    return FileContentPayload(path=path, preview=file.preview, content=file.content, revision=file.revision,
+                              size=file.size)
+
+
+@router.put("/sessions/{session_id}/files/content")
+async def save_file_content(
+    session_id: UUID, body: SaveFileRequest, caller: Annotated[Caller, Depends(current_caller)]
+) -> FileContentPayload:
+    """Saves an edit straight into the session's working tree, where the Changes tab and the merge
+    pick it up like any change the agent makes."""
+    session = get_registry().get_for(caller, session_id)
+    if session.kind in _PLATFORM_KINDS:
+        raise ApiException.conflict("Platform chats publish their documents after a successful test")
+    if session.workspace == _UNSET_PATH:
+        raise ApiException.conflict("The workspace is still being prepared")
+    async with session.operation_lock:
+        file = await workspaces.write_file(session.workspace, body.path, body.content, body.baseRevision)
+    _schedule_changes_refresh(session, debounce=False)
+    return FileContentPayload(path=body.path, preview=file.preview, content=file.content, revision=file.revision,
+                              size=file.size)
 
 
 # --- merge into the default branch -------------------------------------------------------------
@@ -1787,14 +2236,20 @@ async def _reset_conversation(session: Session, caller: Caller) -> AgentRuntime:
     context from the previous one, for every provider alike."""
     previous = _runtime(session)
     credential = await mooi.fetch_agent_credential(caller, str(session.connection_id))
+    # The runtime deletes its logs on close: keep the finished conversation in the trace first.
+    try:
+        await session.trace.archive(_trace_log_directory(session))
+    except Exception:
+        LOG.warning("Session %s could not archive its trace", session.id, exc_info=True)
     await previous.close()
     session.runtime = None
     record(session, EVENT_SESSION_CLEARED, {})
     runtime = create_runtime(session.provider, credential, session.workspace, session.branch,
-                             _emitter(session), _asker(session), session.config,
+                             _emitter(session), _asker(session), session.config, adapter=session.adapter,
                              instructions=_session_instructions(session),
                              environment=_session_environment(session))
     session.runtime = runtime
+    session.trace.follow(runtime.trace_sources)
     try:
         await runtime.start()
     except Exception:
@@ -1812,7 +2267,7 @@ async def check_merge(session_id: UUID, caller: Annotated[Caller, Depends(curren
     token = await mooi.fetch_github_token(caller)
     async with session.operation_lock:
         _require_mergeable(session)
-        _touch_activity(session)
+        _touch(session)
         return _merge_payload(await workspaces.preview_merge(session.workspace, session.base_branch, token))
 
 
@@ -1829,7 +2284,7 @@ async def merge_session(
     token, identity = await asyncio.gather(mooi.fetch_github_token(caller), mooi.fetch_github_identity(caller))
     async with session.operation_lock:
         _require_mergeable(session)
-        _touch_activity(session)
+        _touch(session)
         async with session.changes_lock:
             preview, commit = await workspaces.merge(session.workspace, session.base_branch, message, identity, token)
         if commit is not None:
@@ -1933,16 +2388,33 @@ def _session_instructions(session: Session) -> str:
     carry their own brief instead."""
     if session.kind != "session":
         return ""
-    base = f"http://127.0.0.1:{get_settings().sessions_port}/sessions/{session.id}/development/agent/environment"
-    return f"""## Project development environment
+    root = f"http://127.0.0.1:{get_settings().sessions_port}/sessions/{session.id}"
+    base = f"{root}/development/agent/environment"
+    return f"""## Mooi platform API
+Every Mooi endpoint below lives inside this pod. Use Python urllib with an inline JSON body, never a temporary file, and send the header `X-Mooi-Agent-Token: {session.agent_token}`.
+
+## Development deployment (the Deploy button)
+Mooi previews this session through its development deployment, the root Docker Compose file its Deploy button runs. Whenever the user asks in this chat to set up, change, repair or test the development deployment or the preview, first read the setup brief with `GET {root}/deployment/agent/brief` and follow it exactly: it is the very brief the Deploy button sends, including how to test the deployment. When a message already contains that brief, follow it directly.
+
+## Production deployments and backups
+Production deployments and backups of this project are prepared in their own Mooi chats, each with its own brief, from the Deployments and Backups pages. When the user asks in this chat to set up, change or repair the production deployment or the backups, hand the request over: `POST {root}/platform/agent/production` (or `/platform/agent/backup`) with JSON `{{"request": "<the user's complete request>"}}`. Mooi opens that chat exactly as the page's button does, and the user follows it there (`location` in the answer). Never write production or backup scripts in this session.
+
+## Project development environment
 This project keeps development environment variables named `MOOI_DEVELOPMENT_<NAME>` encrypted in the Mooi platform. Every session of the project shares them: a value saved here is available in every other session, in the Deploy preview and, inherited, in production deployments and backups.
 - Use them for configuration the project needs to run (API keys, tokens, service URLs...). Save a value when the user gives you one or asks you to set, change or remove it. When a value you need is missing, ask the user; never invent credentials.
 - Read them again whenever you need them: the user and other sessions can change them at any time. Tell the user a value only when they ask for it.
 - Never write their values to the repository. The Deploy preview's root Compose file reads them through interpolation, for example `OPENAI_API_KEY: ${{MOOI_DEVELOPMENT_OPENAI_API_KEY}}`; when you run the project yourself, pass the values a command needs through its environment.
 
-Use Python urllib with an inline JSON body, never a temporary file, and send the header `X-Environment-Token: {session.agent_token}`:
+Use the Mooi platform API:
 - `GET {base}`: `values` (the project's variables) and `serverProvided` (names of server-wide defaults whose values you cannot read).
 - `PUT {base}` with JSON `{{"values": {{"MOOI_DEVELOPMENT_NAME": "value"}}}}` (null removes a variable): saves them and returns the stored names.
+
+## Project to-do list
+The project's to-do list is `docs/TODOS.md` on the default branch, shown in the project's To-dos tab and on the workspace To-dos page. Whenever the user asks in this chat to show, add, start, complete, reopen, edit, reorder or remove to-dos, use the Mooi platform API, never edit that file in this session's branch: Mooi commits the change to the default branch and every open view updates at once.
+- `GET {root}/todos/agent`: `state` (`missing`: no file yet; `ready`: managed by Mooi; `unsupported`: content Mooi cannot render, listed in `issues`), `revision`, `title` and `items` (`text`, `status`: `open`, `inProgress` or `done`).
+- `PUT {root}/todos/agent` with JSON `{{"revision": "<revision you read, null when missing>", "title": "<title>", "items": [{{"text": "...", "status": "open"}}]}}`: commits the whole list in that order (items have no length limit). A 409 means the list changed meanwhile: read it again and reapply the request.
+- Keep the order the Mooi views keep: a new item goes on top; done items stay at the bottom, so completing one moves it just above the other done items, and reopening or starting a done one moves it just below the items still to do.
+- When `state` is `unsupported`, do not save: tell the user Mooi cannot render the file and ask whether to clean it up (save the `salvage` items) or keep it and edit it by hand.
 
 ## Shared Docker host
 Docker here is the host's shared engine: other projects' live containers, volumes and networks (production ones included) run on it, and the same names may appear in this repository.
@@ -2018,23 +2490,46 @@ async def development_environment_overview(project_id: UUID,
 @router.put("/development/projects/{project_id}/environment")
 async def update_development_environment(project_id: UUID, body: ProductionEnvironmentUpdate,
                                          caller: Annotated[Caller, Depends(current_caller)]) -> DevelopmentEnvironment:
-    return _development_overview(await mooi.write_development_environment(caller, project_id, body.values))
+    return await _save_development_environment(caller, project_id, body)
 
 
-def _agent_environment_access(session_id: UUID, request: Request) -> tuple[Session, Caller]:
+async def _save_development_environment(caller: Caller, project_id: UUID,
+                                        body: ProductionEnvironmentUpdate) -> DevelopmentEnvironment:
+    """Saves values for every session of the project and announces the new names live, whichever side
+    (the user or an agent) changed them."""
+    overview = _development_overview(await mooi.write_development_environment(caller, project_id, body.values))
+    _channels.publish(caller.player_id, EVENT_DEVELOPMENT_ENVIRONMENT,
+                      {"projectId": str(project_id), **overview.model_dump(mode="json")})
+    return overview
+
+
+_AGENT_TOKEN_HEADER = "X-Mooi-Agent-Token"
+
+
+async def _agent_access(session_id: UUID, request: Request, kind: SessionKind) -> tuple[Session, Caller]:
+    """The one guard of every agent endpoint: only a live chat of `kind`'s own agent, from inside the
+    pod, with its chat's token, acting for the chat's latest caller. Anything else is a plain 404."""
     session = get_registry().get(session_id)
-    token = request.headers.get("X-Environment-Token", "")
+    token = request.headers.get(_AGENT_TOKEN_HEADER, "")
     if (request.client is None or request.client.host not in ("127.0.0.1", "::1")
-            or session is None or session.kind != "session" or session.closing
+            or session is None or session.kind != kind or session.closing
             or not hmac.compare_digest(token, session.agent_token)
             or session.agent_caller is None):
-        raise ApiException.not_found("Development environment not found")
-    return session, session.agent_caller
+        raise ApiException.not_found("Not found")
+    return session, await _agent_caller(session)
+
+
+async def _agent_caller(session: Session) -> Caller | None:
+    """The chat's caller with a valid token: a turn or a test run easily outlasts the access token of the
+    message that started it, so the caller is renewed here rather than failing the agent mid-task."""
+    if session.agent_caller is not None:
+        session.agent_caller = await mooi.renewed(session.agent_caller)
+    return session.agent_caller
 
 
 @router.get("/sessions/{session_id}/development/agent/environment")
 async def agent_development_environment(session_id: UUID, request: Request) -> AgentEnvironment:
-    session, caller = _agent_environment_access(session_id, request)
+    session, caller = await _agent_access(session_id, request, "session")
     return _agent_environment(await mooi.fetch_development_environment(caller, session.project_id),
                               development_environment())
 
@@ -2042,8 +2537,66 @@ async def agent_development_environment(session_id: UUID, request: Request) -> A
 @router.put("/sessions/{session_id}/development/agent/environment")
 async def agent_save_development_environment(session_id: UUID, request: Request,
                                              body: ProductionEnvironmentUpdate) -> DevelopmentEnvironment:
-    session, caller = _agent_environment_access(session_id, request)
-    return _development_overview(await mooi.write_development_environment(caller, session.project_id, body.values))
+    session, caller = await _agent_access(session_id, request, "session")
+    return await _save_development_environment(caller, session.project_id, body)
+
+
+# --- the project's to-do list: docs/TODOS.md on the default branch, the file being the only copy ---
+
+
+@router.get("/projects/{project_id}/todos")
+async def project_todos(project_id: UUID, caller: Annotated[Caller, Depends(current_caller)]) -> dict:
+    return await mooi.fetch_todos(caller, project_id)
+
+
+@router.put("/projects/{project_id}/todos")
+async def save_project_todos(project_id: UUID, body: TodosUpdate,
+                             caller: Annotated[Caller, Depends(current_caller)]) -> dict:
+    return await _save_todos(caller, project_id, body)
+
+
+async def _save_todos(caller: Caller, project_id: UUID, body: TodosUpdate) -> dict:
+    """Commits the list and announces it live, whichever side (the To-dos tab, another device or an
+    agent) changed it."""
+    todos = await mooi.write_todos(caller, project_id, body.model_dump(mode="json"))
+    _channels.publish(caller.player_id, EVENT_PROJECT_TODOS, {"projectId": str(project_id), "todos": todos})
+    return todos
+
+
+@router.get("/sessions/{session_id}/todos/agent")
+async def agent_todos(session_id: UUID, request: Request) -> dict:
+    session, caller = await _agent_access(session_id, request, "session")
+    return await mooi.fetch_todos(caller, session.project_id)
+
+
+@router.put("/sessions/{session_id}/todos/agent")
+async def agent_save_todos(session_id: UUID, request: Request, body: TodosUpdate) -> dict:
+    session, caller = await _agent_access(session_id, request, "session")
+    return await _save_todos(caller, session.project_id, body)
+
+
+class PlatformHandoffRequest(BaseModel):
+    request: str = Field(min_length=1, max_length=20_000)
+
+
+_PLATFORM_LOCATIONS = {"production": "/deployments/{project}?tab=chat", "backup": "/backups/{project}?tab=chat"}
+
+
+@router.post("/sessions/{session_id}/platform/agent/{kind}", status_code=status.HTTP_201_CREATED)
+async def agent_platform_handoff(session_id: UUID, kind: Literal["production", "backup"], request: Request,
+                                 body: PlatformHandoffRequest) -> dict:
+    """A production or backup request made in a session chat opens that platform chat exactly like the
+    page's button: same account, model and effort as this session, the request as its first message
+    wrapped in the platform brief. A busy platform chat is never replaced from here."""
+    session, caller = await _agent_access(session_id, request, "session")
+    current = next((chat for chat in get_registry().list_for(caller.player_id, session.project_id)
+                    if chat.kind == kind and not chat.closing), None)
+    if current is not None and current.status in (STATUS_PROVISIONING, STATUS_WORKING, STATUS_WAITING, STATUS_COMPACTING):
+        raise ApiException.conflict(f"The project's {kind} chat is busy: ask the user to continue there")
+    chat = await _open_session(CreateSessionRequest(
+        projectId=session.project_id, provider=session.provider, adapter=session.adapter or None,
+        connectionId=session.connection_id, model=session.config.model, effort=session.config.effort, kind=kind, initialMessage=body.request), caller)
+    return {"sessionId": str(chat.id), "location": _PLATFORM_LOCATIONS[kind].format(project=session.project_id)}
 
 
 # --- production: project-scoped configuration, deployments and GitHub releases -----------------
@@ -2071,7 +2624,6 @@ class ProductionRun:
     player_id: UUID
     snapshot: ProductionSnapshot = field(default_factory=ProductionSnapshot)
     logs: list[str] = field(default_factory=list)
-    log: EventLog = field(default_factory=lambda: EventLog(limit=256))
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     task: asyncio.Task[None] | None = None
 
@@ -2079,6 +2631,23 @@ class ProductionRun:
 _production_runs: dict[UUID, ProductionRun] = {}
 _production_capacity_lock = asyncio.Lock()
 _production_status_capacity = asyncio.Semaphore(16)
+_OUTCOME_RETRY_SECONDS = (1, 3)
+
+
+async def _save_outcome(save: Callable[[], Awaitable[None]], operation: str) -> None:
+    """Persists a production or backup run's outcome, retrying while mic-mooi is unreachable. An outcome
+    that still cannot be saved is later reconciled as interrupted, never left running."""
+    failure: Exception | None = None
+    for delay in (0, *_OUTCOME_RETRY_SECONDS):
+        await asyncio.sleep(delay)
+        try:
+            await save()
+            return
+        except Exception as error:
+            failure = error
+            if not (isinstance(error, ApiException) and error.status_code == status.HTTP_502_BAD_GATEWAY):
+                break
+    LOG.warning("Could not save the outcome of %s", operation, exc_info=failure)
 
 
 def _production_run(caller: Caller, project_id: UUID) -> ProductionRun:
@@ -2101,22 +2670,30 @@ def _production_chat(player_id: UUID, project_id: UUID) -> Session | None:
                  if session.kind == "production" and not session.closing), None)
 
 
+def _operation_payload(run: ProductionRun | BackupRun) -> dict[str, Any]:
+    """A project operation as the live channel carries it: snapshot plus retained console output."""
+    return {"projectId": str(run.project_id), "snapshot": run.snapshot.model_dump(mode="json"), "logs": run.logs}
+
+
 def _publish_production(run: ProductionRun, snapshot: ProductionSnapshot) -> None:
     run.snapshot = snapshot
-    run.log.append(EVENT_PRODUCTION_UPDATED, snapshot.model_dump(mode="json"))
+    _channels.publish(run.player_id, EVENT_PRODUCTION_UPDATED,
+                      {"projectId": str(run.project_id), "snapshot": snapshot.model_dump(mode="json")})
 
 
 def _publish_production_sync(run: ProductionRun) -> None:
-    run.log.append(EVENT_PRODUCTION_SYNC, {"snapshot": run.snapshot.model_dump(mode="json"), "logs": run.logs})
+    _channels.publish(run.player_id, EVENT_PRODUCTION_SYNC, _operation_payload(run))
 
 
 def _publish_production_output(run: ProductionRun, operation_id: UUID, lines: list[str]) -> None:
     run.logs = [*run.logs, *lines][-_PRODUCTION_LOG_LIMIT:]
-    run.log.append(EVENT_PRODUCTION_LOG, {"operationId": str(operation_id), "lines": lines})
+    _channels.publish(run.player_id, EVENT_PRODUCTION_LOG,
+                      {"projectId": str(run.project_id), "operationId": str(operation_id), "lines": lines})
 
 
 def _notify_production_configuration(run: ProductionRun, documents: ProductionDocuments) -> None:
-    run.log.append(EVENT_PRODUCTION_CONFIGURATION, {"revision": documents.revision})
+    _channels.publish(run.player_id, EVENT_PRODUCTION_CONFIGURATION,
+                      {"projectId": str(run.project_id), "revision": documents.revision})
 
 
 async def _production_environment(caller: Caller, project_id: UUID) -> dict[str, str]:
@@ -2153,41 +2730,67 @@ def _production_prompt(session: Session, request: str) -> str:
 
 The working directory is a clone of the default branch `{branch}`. Read it to understand how the project builds, runs and is configured.
 
-## Deployment documents
-The production configuration is exactly three VIRTUAL documents stored only in the Mooi platform. Never write them to the repository or to any file:
-- `DEPLOYMENT.md` (field `manifest`): what the deployment does, its target, method, prerequisites, required environment variables and how the service is verified.
-- `deploy.sh` (field `script`): a non-interactive bash script the platform runs from a detached checkout of the GitHub release the user selects (that checkout is the working directory). It must start with `set -euo pipefail`, be repeatable, read every secret from environment variables and deploy exactly `MOOI_PRODUCTION_RELEASE_SHA`.
-- `status.sh` (field `statusScript`): a non-interactive, read-only bash script, safe to run repeatedly from an empty working directory, that exits 0 only while the deployed service is healthy and prints concise status details. It must not depend on release variables.
+## How production works in Mooi
+The user describes the deployment in free text, and it can be anything: a local machine, one or several VPS, AWS, GCP, Azure, a PaaS, a Kubernetes cluster, or several targets at once (for example a VPS and GCP together). Shape the setup to that description and to what the project needs, never to a fixed template.
+You never deploy with your own tools. You write a deterministic, non-interactive deploy script, the platform runs it and you prove it with a real test deployment. Once a test succeeds, the Deploy button runs exactly that script for every later release without any agent, so everything a deployment needs must live in the script, the release files it reads and the stored variables.
+A production setup is made of three kinds of artifacts; decide where each piece belongs:
+1. Platform files (always): `DEPLOYMENT.md`, `deploy.sh` and `status.sh`, stored only in Mooi.
+2. Environment variables (whenever the deployment needs configuration or secrets): values stored only in Mooi.
+3. Repository files (only when the target needs them): for example a production Compose file, production Dockerfiles, Kubernetes manifests or a CI workflow, committed with variable references, never with values.
+
+## Platform files
+They are VIRTUAL documents stored only in the Mooi platform. Never write them to the repository or to any file: they describe the real production infrastructure (hosts, accounts, paths, topology), which must never reach anyone who can read the repository.
+- `DEPLOYMENT.md` (field `manifest`): the natural-language manifest of the deployment, and the source you or another agent read to change or repair it later. Describe every target, the method, prerequisites, the repository files and variables involved (names only, never values), the production-specific resource names, how a release reaches each target and how the service is verified. Keep it true: update it with every change to the setup.
+- `deploy.sh` (field `script`): a non-interactive bash script the platform runs from a detached checkout of the release being deployed (that checkout is the working directory). It must start with `set -euo pipefail`, be idempotent (a fresh target and an already deployed one both end up running the release; prepare one-time prerequisites itself when it can), read every value from environment variables, deploy exactly `MOOI_PRODUCTION_RELEASE_SHA` to every target and exit non-zero when any target fails.
+- `status.sh` (field `statusScript`): a non-interactive, read-only bash script, safe to run repeatedly from an empty working directory, that exits 0 only while every deployed target is healthy and prints concise status details per target. It must not depend on release variables or repository files.
 
 Save each document with the platform API as soon as you write or change it, one document per request, so the user follows your progress in the Platform files tab.
 
-## Production Compose in the repository
-When production uses Docker Compose, its definition MUST be a tracked `docker-compose.yml` at the repository root, visible in Changes and committed through the repository commit endpoint. Keep DEPLOYMENT.md, deploy.sh and status.sh in Platform files. Never embed, generate or store the Compose definition in those documents.
-Read an existing root Compose first. Preserve the session preview and application behaviour; if it differs from production, use a separate root `docker-compose.yml` for production and explicit `-f` paths in deployment commands. deploy.sh must consume the Compose from the selected release checkout (and transfer that same file when deploying remotely), with environment values supplied securely to the target process. Never depend on the chat workspace or a newer branch version. status.sh must still work from an empty directory, checking the live deployment without embedding Compose.
+## Isolation
+Production is a deployment system of its own, independent from and correlated with no other: the development deployment (root Compose files, their Dockerfiles and `.env`, which Mooi runs as session previews), local tooling (a Makefile or scripts) and any other deployment the repository or the target already has. Never reuse, include, extend, reference or edit their files, and never change them to fit production; read them only to learn how the project builds and runs.
+The same holds at run time: production must never collide with, reuse or affect another deployment's resources, even on a shared machine. Give every runtime resource a production-specific name (Compose project, images and tags, volumes, networks, databases, remote directories, services and units, cloud resources and buckets), never set fixed container names or reuse the development stack's names, and publish only the ports production needs. deploy.sh and status.sh touch only this deployment's resources: never prune, stop or remove anything else.
+Every tracked production file lives under `deploy/production/`, never at the repository root, where Mooi would resolve it as the development deployment (a CI workflow stays where its platform requires it). When production builds images, give it its own Dockerfiles there (`deploy/production/<artifact>/Dockerfile`, build context pointing at the artifact's source).
+If an earlier production setup keeps a tracked file elsewhere (for example a Compose file at the root that deploy.sh references), move it under `deploy/production/` as part of this change and leave every development file untouched.
+
+## Production Compose
+When production uses Docker Compose (typical on a VPS or a local machine), its definition MUST be a tracked `deploy/production/compose.prod.yml`, visible in Changes and committed through the repository commit endpoint. Never embed, generate or store the Compose definition in the platform files.
+Deployment commands always name it explicitly (`-f deploy/production/compose.prod.yml` with its own project name). deploy.sh must consume the Compose from the release checkout (and transfer that same file when deploying remotely), with environment values supplied securely to the target process. Never depend on the chat workspace or a newer branch version. status.sh must still work from an empty directory, checking the live deployment without embedding Compose.
 Every configurable Compose value must use environment interpolation. Every sensitive value must come from `MOOI_PRODUCTION_` or inherited `MOOI_DEVELOPMENT_` variables, without literal secrets or secret defaults in tracked files. Persist production values through the existing environment endpoint, never in the repository. Explicitly reference each required Compose variable in deploy.sh (for example `${{MOOI_PRODUCTION_NAME:?required}}`) so the platform detects missing values before deploying, including variables forwarded over SSH.
 
 ## Environment
 Scripts read configuration only from variables named `MOOI_PRODUCTION_<NAME>` and the project's development variables `MOOI_DEVELOPMENT_<NAME>`, which they inherit from the project's sessions: reuse a development value (an API key, a service URL...) when production needs exactly the same one, and give production its own `MOOI_PRODUCTION_` variable when it must differ. The platform provides `MOOI_PRODUCTION_RELEASE_TAG`, `MOOI_PRODUCTION_RELEASE_SHA` and `MOOI_PRODUCTION_RELEASE_URL`. Every other `MOOI_PRODUCTION_` or `MOOI_DEVELOPMENT_` variable the scripts mention without a shell default (`${{NAME:-default}}`) is required. Ask the user for each missing value (hosts, users, keys, tokens, domains...) and never invent credentials. Save the `MOOI_PRODUCTION_` values the user gives you with the environment endpoint; the user can also set them in the Environment section of the deployment overview. Development values belong to the project's sessions: ask the user to set a missing one from any session. Read the stored values with the environment endpoint whenever you need them, and tell the user a value only when they ask for it.
 
 ## Repository changes
-A production Compose definition always belongs in the repository. Other deployment files (for example a Dockerfile or a CI workflow) belong there when needed. Create or edit them in the working directory: the user sees them in the Changes tab. Never change application behaviour for it.
+Add repository files only when the target needs them: a setup made only of platform files and variables is fine (for example a platform deployed through its CLI), and a production Compose definition always belongs in the repository. They hold variable references, never values. Create or edit them in the working directory: the user sees them in the Changes tab. Never change application behaviour for it.
 Before committing, ask the user whether to commit and push them to `{branch}`, listing every changed file (use your question tool when available, otherwise ask and wait for the reply). Only after an explicit yes, publish them with the commit endpoint; never run `git commit` or `git push` yourself. If the user declines, revert those files; never fall back to embedding Compose in Platform files.
 
+## Releases
+Only releases reach production, and the platform chooses and creates them. A test deploys:
+- right after you commit repository changes, a new release the platform creates from `{branch}`, so it contains them;
+- otherwise the release currently deployed in production (latest successful deployment);
+- before the first deployment, the latest published release, or a first release ({_FIRST_RELEASE_TAG}) created on `{branch}` when the repository has none.
+So commit every repository change the deployment needs before you test. Never run `git tag` or create, publish or choose releases yourself.
+
 ## Platform API
-Use Python urllib with an inline JSON body, never a temporary file, and send the header `X-Production-Edit-Token: {session.agent_token}`:
+Use Python urllib with an inline JSON body, never a temporary file, and send the header `X-Mooi-Agent-Token: {session.agent_token}`:
 - `GET {base}/documents`: active and draft documents plus the names of stored environment variables.
 - `PATCH {base}/documents` with any of the JSON keys `manifest`, `script`, `statusScript`: saves those documents into the draft and keeps the others.
 - `GET {base}/environment`: `values` (the project's stored `MOOI_PRODUCTION_` and inherited `MOOI_DEVELOPMENT_` values the scripts receive) and `serverProvided` (names of server-wide values whose values you cannot read).
 - `PUT {base}/environment` with JSON `{{"values": {{"MOOI_PRODUCTION_NAME": "value"}}}}` (null removes a variable).
 - `POST {base}/repository/commit` with JSON `{{"message": "<commit title>"}}`: commits every repository change onto `{branch}` as one commit and pushes it. It answers 409 with the conflicting files when `{branch}` moved in a conflicting way.
 - `GET {base}/deployments/{{operationId}}`: read-only detail of a past attempt (files, result, redacted output).
-- `POST {base}/deployments` with an empty JSON body `{{}}`: runs a real test deployment of the draft (or the active configuration when there is no draft). The platform chooses the release itself: right after you commit repository changes, a new release it creates from `{branch}`; otherwise the release currently deployed in production (latest successful deployment) or, when nothing was ever deployed, {_FIRST_RELEASE_TAG}, created on `{branch}` when missing. It returns the deployment snapshot.
+- `POST {base}/deployments` with an empty JSON body `{{}}`: runs a real test deployment of the draft (or the active configuration when there is no draft) with the release chosen as described in Releases. It returns the deployment snapshot.
 - `GET {base}/deployment?wait=120`: waits up to 120 seconds while a deployment runs, then returns its snapshot (state running, succeeded or failed; message; releaseTag) and the latest redacted output. Repeat it while the state is running.
 
-## Testing
-Testing is mandatory: finish every setup, update or fix with a successful test deployment. Once all three documents are saved, every required variable is stored and any repository change is committed, start the test and wait for its result. If it fails, find the cause in the output, save the corrected documents (ask the user for anything missing) and test again. A successful test deploys that release to production and makes the draft the active configuration. Only after a successful test tell the user clearly that the deployment is tested and working: they can deploy any release with the Deploy button and close this chat.
+## Workflow
+1. Read the repository and the current documents. When a setup exists, its DEPLOYMENT.md is your starting point: a change (a new target, another provider, a fix) updates the repository files it needs, deploy.sh, status.sh and DEPLOYMENT.md together, so they always describe the same deployment.
+2. Settle the targets and the method with the user and ask for every missing value.
+3. Write the repository files, save the platform files and store the variables.
+4. Commit the repository changes once the user approves them.
+5. Test. Testing is mandatory: finish every setup, update or fix with a successful test deployment. Once all three documents are saved, every required variable is stored and any repository change is committed, start the test and wait for its result. If it fails, find the cause in the output, save the corrected documents (ask the user for anything missing) and test again. A successful test deploys that release to production and makes the draft the active configuration.
+6. Only after a successful test tell the user clearly that the deployment is tested and working: from now on the Deploy button runs this script deterministically for any release, without an agent. Suggest clearing this chat (or closing it); it can be reused later to change or fix the deployment.
 
-Never run deploy.sh yourself and never choose, create or publish releases yourself: the test endpoint does it.
+Never run deploy.sh yourself and never change production with your own tools (SSH, Docker, cloud CLIs...): every change reaches production through deploy.sh and the test endpoint. Read-only inspection to diagnose a failure is fine.
 
 ## Request
 {request}"""
@@ -2287,48 +2890,6 @@ async def production_overview(project_id: UUID, caller: Annotated[Caller, Depend
         snapshot=run.snapshot, chatSessionId=chat.id if chat else None,
         chatTested=bool(chat and chat.platform_tested),
     )
-
-
-@router.get("/production/projects/{project_id}/events")
-async def stream_production_events(project_id: UUID, request: Request,
-                                   caller: Annotated[Caller, Depends(current_caller)]) -> StreamingResponse:
-    """Live production state: a `production.sync` snapshot with the retained output, then updates,
-    output batches and configuration changes. Reconnecting simply starts from a fresh sync."""
-    _, run = await _owned_production(caller, project_id)
-    settings = get_settings()
-    queue = run.log.subscribe()
-
-    async def frames() -> AsyncIterator[str]:
-        try:
-            last_seq = run.log.last_seq
-            yield sse_frame(Event(last_seq, datetime.now(UTC), EVENT_PRODUCTION_SYNC,
-                                  {"snapshot": run.snapshot.model_dump(mode="json"), "logs": run.logs}))
-            next_auth_check = time.monotonic() + settings.introspection_cache_seconds
-            while True:
-                if time.monotonic() >= next_auth_check:
-                    try:
-                        await current_caller(request)
-                    except Exception:
-                        LOG.debug("Production stream authentication ended", exc_info=True)
-                        return
-                    next_auth_check = time.monotonic() + settings.introspection_cache_seconds
-                if await request.is_disconnected():
-                    return
-                try:
-                    event = await asyncio.wait_for(queue.get(), settings.sse_heartbeat_seconds)
-                except TimeoutError:
-                    yield sse_heartbeat()
-                    continue
-                if event is None:
-                    return
-                if event.seq > last_seq:
-                    yield sse_frame(event)
-                    last_seq = event.seq
-        finally:
-            run.log.unsubscribe(queue)
-
-    return StreamingResponse(frames(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"})
 
 
 @router.get("/production/projects/{project_id}/documents")
@@ -2446,10 +3007,9 @@ async def _run_production(run: ProductionRun, caller: Caller, project: mooi.Proj
 
     async def conclude(state: Literal["succeeded", "failed"], message: str) -> None:
         """Persist first, so clients reloading history on the final snapshot see the outcome."""
-        try:
-            await mooi.finish_production_deployment(caller, project.id, operation_id, state, message, run.logs)
-        except Exception:
-            LOG.warning("Could not save %s deployment %s", state, operation_id, exc_info=True)
+        logs = run.logs
+        await _save_outcome(lambda: mooi.finish_production_deployment(project.id, operation_id, state, message, logs),
+                            f"deployment {operation_id}")
         _publish_production(run, started.model_copy(update={
             "state": state, "message": message, "updatedAt": datetime.now(UTC)}))
 
@@ -2467,7 +3027,7 @@ async def _run_production(run: ProductionRun, caller: Caller, project: mooi.Proj
         if code != 0:
             raise RuntimeError(f"deploy.sh exited with code {code}")
         if publish_draft:
-            documents = ProductionDocuments.model_validate(await mooi.publish_production_recipe(caller, project.id))
+            documents = ProductionDocuments.model_validate(await mooi.publish_production_recipe(project.id))
             _notify_production_configuration(run, documents)
         chat = _production_chat(run.player_id, run.project_id)
         if chat is not None:
@@ -2571,20 +3131,9 @@ async def delete_production_deployment(project_id: UUID, operation_id: UUID,
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-def _agent_recipe_access(session_id: UUID, request: Request) -> tuple[Session, Caller]:
-    session = get_registry().get(session_id)
-    token = request.headers.get("X-Production-Edit-Token", "")
-    if (request.client is None or request.client.host not in ("127.0.0.1", "::1")
-            or session is None or session.kind != "production" or session.closing
-            or not hmac.compare_digest(token, session.agent_token)
-            or session.agent_caller is None):
-        raise ApiException.not_found("Deployment configuration not found")
-    return session, session.agent_caller
-
-
 @router.get("/sessions/{session_id}/production/agent/documents")
 async def agent_production_documents(session_id: UUID, request: Request) -> ProductionDocuments:
-    session, caller = _agent_recipe_access(session_id, request)
+    session, caller = await _agent_access(session_id, request, "production")
     return await _production_documents(caller, session.project_id)
 
 
@@ -2593,7 +3142,7 @@ async def agent_production_documents(session_id: UUID, request: Request) -> Prod
 async def agent_save_production_documents(session_id: UUID, request: Request,
                                           body: ProductionFilesPatch) -> ProductionDocuments:
     """Saves some or all documents into the draft; a full PUT behaves exactly like a PATCH of all three."""
-    session, caller = _agent_recipe_access(session_id, request)
+    session, caller = await _agent_access(session_id, request, "production")
     return await _save_production_draft(caller, session.project_id, body)
 
 
@@ -2601,7 +3150,7 @@ async def agent_save_production_documents(session_id: UUID, request: Request,
 async def agent_commit_repository(session_id: UUID, request: Request, body: MergeRequest) -> MergePayload:
     """Publishes the chat's repository changes, which the agent only calls after the user approved
     them: one commit onto the default branch, pushed as a fast-forward and never forced."""
-    session, caller = _agent_recipe_access(session_id, request)
+    session, caller = await _agent_access(session_id, request, "production")
     payload = await _commit_platform_repository(session, caller, body)
     if payload.commit is not None:
         session.production_release_pending = True
@@ -2630,7 +3179,7 @@ async def _commit_platform_repository(session: Session, caller: Caller, body: Me
 
 @router.get("/sessions/{session_id}/production/agent/environment")
 async def agent_production_environment(session_id: UUID, request: Request) -> AgentEnvironment:
-    session, caller = _agent_recipe_access(session_id, request)
+    session, caller = await _agent_access(session_id, request, "production")
     development, stored = await asyncio.gather(mooi.fetch_development_environment(caller, session.project_id),
                                                mooi.fetch_production_environment(caller, session.project_id))
     return _agent_environment({**development, **stored}, {**development_environment(), **production_environment()})
@@ -2639,20 +3188,20 @@ async def agent_production_environment(session_id: UUID, request: Request) -> Ag
 @router.put("/sessions/{session_id}/production/agent/environment")
 async def agent_save_production_environment(session_id: UUID, request: Request,
                                             body: ProductionEnvironmentUpdate) -> ProductionDocuments:
-    session, caller = _agent_recipe_access(session_id, request)
+    session, caller = await _agent_access(session_id, request, "production")
     return await _save_production_environment(caller, session.project_id, body)
 
 
 @router.get("/sessions/{session_id}/production/agent/deployments/{operation_id}")
 async def agent_production_deployment_detail(session_id: UUID, operation_id: UUID, request: Request) -> dict:
-    session, caller = _agent_recipe_access(session_id, request)
+    session, caller = await _agent_access(session_id, request, "production")
     return await mooi.fetch_production_deployment_detail(caller, session.project_id, operation_id)
 
 
 @router.post("/sessions/{session_id}/production/agent/deployments", status_code=status.HTTP_202_ACCEPTED)
 async def agent_test_production(session_id: UUID, request: Request) -> ProductionSnapshot:
     """A real deployment of the current configuration with the release `_test_release` picks."""
-    session, caller = _agent_recipe_access(session_id, request)
+    session, caller = await _agent_access(session_id, request, "production")
     project = await mooi.fetch_project(caller, session.project_id)
     run = _production_run(caller, session.project_id)
     release = await _test_release(caller, project, session.production_release_pending)
@@ -2665,7 +3214,7 @@ async def agent_test_production(session_id: UUID, request: Request) -> Productio
 @router.get("/sessions/{session_id}/production/agent/deployment")
 async def agent_production_deployment(session_id: UUID, request: Request, wait: int = 0) -> dict:
     """The live deployment snapshot and its latest output, optionally waiting while it runs."""
-    session, caller = _agent_recipe_access(session_id, request)
+    session, caller = await _agent_access(session_id, request, "production")
     run = _production_run(caller, session.project_id)
     task = run.task
     if wait > 0 and run.snapshot.state == "running" and task is not None and not task.done():
@@ -2679,8 +3228,6 @@ async def close_productions() -> None:
     for task in tasks:
         task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
-    for run in _production_runs.values():
-        run.log.close()
 
 
 # --- backups: project-scoped configuration, backups and restores -------------------------------
@@ -2816,7 +3363,6 @@ class BackupRun:
     player_id: UUID
     snapshot: BackupSnapshot = field(default_factory=BackupSnapshot)
     logs: list[str] = field(default_factory=list)
-    log: EventLog = field(default_factory=lambda: EventLog(limit=256))
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     task: asyncio.Task[None] | None = None
     # Backups the chat's agent made, with the (revision, draft) of the documents that made them: a
@@ -2853,20 +3399,22 @@ async def _backup_documents(caller: Caller, project_id: UUID) -> BackupDocuments
 
 def _publish_backup(run: BackupRun, snapshot: BackupSnapshot) -> None:
     run.snapshot = snapshot
-    run.log.append(EVENT_BACKUP_UPDATED, snapshot.model_dump(mode="json"))
+    _channels.publish(run.player_id, EVENT_BACKUP_UPDATED,
+                      {"projectId": str(run.project_id), "snapshot": snapshot.model_dump(mode="json")})
 
 
 def _publish_backup_sync(run: BackupRun) -> None:
-    run.log.append(EVENT_BACKUP_SYNC, {"snapshot": run.snapshot.model_dump(mode="json"), "logs": run.logs})
+    _channels.publish(run.player_id, EVENT_BACKUP_SYNC, _operation_payload(run))
 
 
 def _publish_backup_output(run: BackupRun, operation_id: UUID, lines: list[str]) -> None:
     run.logs = [*run.logs, *lines][-_PRODUCTION_LOG_LIMIT:]
-    run.log.append(EVENT_BACKUP_LOG, {"operationId": str(operation_id), "lines": lines})
+    _channels.publish(run.player_id, EVENT_BACKUP_LOG,
+                      {"projectId": str(run.project_id), "operationId": str(operation_id), "lines": lines})
 
 
 def _notify_backup_configuration(run: BackupRun, revision: int) -> None:
-    run.log.append(EVENT_BACKUP_CONFIGURATION, {"revision": revision})
+    _channels.publish(run.player_id, EVENT_BACKUP_CONFIGURATION, {"projectId": str(run.project_id), "revision": revision})
 
 
 def _backup_key(backup_id: UUID, started_at: datetime, release_tag: str) -> str:
@@ -3012,10 +3560,9 @@ async def _run_backup_operation(run: BackupRun, caller: Caller, project: mooi.Pr
 
     async def conclude(state: Literal["succeeded", "failed"], message: str) -> None:
         """Persist first, so clients reloading the list on the final snapshot see the outcome."""
-        try:
-            await mooi.finish_backup_operation(caller, project.id, backup_id, operation_id, state, message, run.logs)
-        except Exception:
-            LOG.warning("Could not save %s backup operation %s", state, operation_id, exc_info=True)
+        logs = run.logs
+        await _save_outcome(lambda: mooi.finish_backup_operation(project.id, backup_id, operation_id, state, message,
+                                                                 logs), f"backup operation {operation_id}")
         _publish_backup(run, started.model_copy(update={"state": state, "message": message,
                                                         "updatedAt": datetime.now(UTC)}))
 
@@ -3036,7 +3583,7 @@ async def _run_backup_operation(run: BackupRun, caller: Caller, project: mooi.Pr
         if code != 0:
             raise RuntimeError(f"{name} exited with code {code}")
         if publish_draft:
-            documents = BackupDocuments.model_validate(await mooi.publish_backup_recipe(caller, project.id))
+            documents = BackupDocuments.model_validate(await mooi.publish_backup_recipe(project.id))
             _notify_backup_configuration(run, documents.revision)
         if proves and (chat := _backup_chat(run.player_id, run.project_id)) is not None:
             chat.platform_tested = True
@@ -3130,7 +3677,7 @@ The platform provides `MOOI_BACKUP_ID` (date, time and release of the backup plu
 Backups should almost never need repository changes. Only when they truly do, edit files in the working directory (the user sees them in the Changes tab), ask the user whether to commit and push them to `{branch}` listing every changed file, and only after an explicit yes publish them with the commit endpoint; never run `git commit` or `git push` yourself. Backups run from the release deployed in production, so committed changes only apply once the user deploys a new release from Deployments: tell them.
 
 ## Platform API
-Use Python urllib with an inline JSON body, never a temporary file, and send the header `X-Backup-Edit-Token: {session.agent_token}`:
+Use Python urllib with an inline JSON body, never a temporary file, and send the header `X-Mooi-Agent-Token: {session.agent_token}`:
 - `GET {base}/documents`: active and draft documents plus the names of stored backup environment variables.
 - `PATCH {base}/documents` with any of the JSON keys `manifest`, `backupScript`, `restoreScript`, `deleteScript`: saves those documents into the draft and keeps the others.
 - `GET {base}/environment`: `values` (the project's stored `MOOI_BACKUP_` values plus the inherited `MOOI_PRODUCTION_` and `MOOI_DEVELOPMENT_` ones the scripts receive) and `serverProvided` (names of server-wide values whose values you cannot read).
@@ -3173,48 +3720,6 @@ async def backup_overview(project_id: UUID, caller: Annotated[Caller, Depends(cu
         snapshot=run.snapshot, chatSessionId=chat.id if chat else None,
         chatTested=bool(chat and chat.platform_tested), deployedRelease=deployed,
     )
-
-
-@router.get("/backups/projects/{project_id}/events")
-async def stream_backup_events(project_id: UUID, request: Request,
-                               caller: Annotated[Caller, Depends(current_caller)]) -> StreamingResponse:
-    """Live backup state: a `backup.sync` snapshot with the retained output, then updates, output
-    batches and configuration changes. Reconnecting simply starts from a fresh sync."""
-    _, run = await _owned_backups(caller, project_id)
-    settings = get_settings()
-    queue = run.log.subscribe()
-
-    async def frames() -> AsyncIterator[str]:
-        try:
-            last_seq = run.log.last_seq
-            yield sse_frame(Event(last_seq, datetime.now(UTC), EVENT_BACKUP_SYNC,
-                                  {"snapshot": run.snapshot.model_dump(mode="json"), "logs": run.logs}))
-            next_auth_check = time.monotonic() + settings.introspection_cache_seconds
-            while True:
-                if time.monotonic() >= next_auth_check:
-                    try:
-                        await current_caller(request)
-                    except Exception:
-                        LOG.debug("Backup stream authentication ended", exc_info=True)
-                        return
-                    next_auth_check = time.monotonic() + settings.introspection_cache_seconds
-                if await request.is_disconnected():
-                    return
-                try:
-                    event = await asyncio.wait_for(queue.get(), settings.sse_heartbeat_seconds)
-                except TimeoutError:
-                    yield sse_heartbeat()
-                    continue
-                if event is None:
-                    return
-                if event.seq > last_seq:
-                    yield sse_frame(event)
-                    last_seq = event.seq
-        finally:
-            run.log.unsubscribe(queue)
-
-    return StreamingResponse(frames(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"})
 
 
 @router.get("/backups/projects/{project_id}/documents")
@@ -3302,33 +3807,22 @@ async def forget_backup(project_id: UUID, backup_id: UUID, caller: Annotated[Cal
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-def _agent_backup_access(session_id: UUID, request: Request) -> tuple[Session, Caller]:
-    session = get_registry().get(session_id)
-    token = request.headers.get("X-Backup-Edit-Token", "")
-    if (request.client is None or request.client.host not in ("127.0.0.1", "::1")
-            or session is None or session.kind != "backup" or session.closing
-            or not hmac.compare_digest(token, session.agent_token)
-            or session.agent_caller is None):
-        raise ApiException.not_found("Backup configuration not found")
-    return session, session.agent_caller
-
-
 @router.get("/sessions/{session_id}/backup/agent/documents")
 async def agent_backup_documents(session_id: UUID, request: Request) -> BackupDocuments:
-    session, caller = _agent_backup_access(session_id, request)
+    session, caller = await _agent_access(session_id, request, "backup")
     return await _backup_documents(caller, session.project_id)
 
 
 @router.put("/sessions/{session_id}/backup/agent/documents")
 @router.patch("/sessions/{session_id}/backup/agent/documents")
 async def agent_save_backup_documents(session_id: UUID, request: Request, body: BackupFilesPatch) -> BackupDocuments:
-    session, caller = _agent_backup_access(session_id, request)
+    session, caller = await _agent_access(session_id, request, "backup")
     return await _save_backup_draft(caller, session.project_id, body)
 
 
 @router.get("/sessions/{session_id}/backup/agent/environment")
 async def agent_backup_environment(session_id: UUID, request: Request) -> AgentEnvironment:
-    session, caller = _agent_backup_access(session_id, request)
+    session, caller = await _agent_access(session_id, request, "backup")
     development, production, stored = await asyncio.gather(
         mooi.fetch_development_environment(caller, session.project_id),
         mooi.fetch_production_environment(caller, session.project_id),
@@ -3340,13 +3834,13 @@ async def agent_backup_environment(session_id: UUID, request: Request) -> AgentE
 @router.put("/sessions/{session_id}/backup/agent/environment")
 async def agent_save_backup_environment(session_id: UUID, request: Request,
                                         body: ProductionEnvironmentUpdate) -> BackupDocuments:
-    session, caller = _agent_backup_access(session_id, request)
+    session, caller = await _agent_access(session_id, request, "backup")
     return await _save_backup_environment(caller, session.project_id, body)
 
 
 @router.get("/sessions/{session_id}/backup/agent/production")
 async def agent_backup_production(session_id: UUID, request: Request) -> dict:
-    session, caller = _agent_backup_access(session_id, request)
+    session, caller = await _agent_access(session_id, request, "backup")
     documents, deployed = await asyncio.gather(_production_documents(caller, session.project_id),
                                                _current_release(caller, session.project_id))
     return {"active": documents.active.model_dump() if documents.active else None,
@@ -3355,25 +3849,25 @@ async def agent_backup_production(session_id: UUID, request: Request) -> dict:
 
 @router.post("/sessions/{session_id}/backup/agent/repository/commit")
 async def agent_commit_backup_repository(session_id: UUID, request: Request, body: MergeRequest) -> MergePayload:
-    session, caller = _agent_backup_access(session_id, request)
+    session, caller = await _agent_access(session_id, request, "backup")
     return await _commit_platform_repository(session, caller, body)
 
 
 @router.get("/sessions/{session_id}/backup/agent/backups")
 async def agent_backups(session_id: UUID, request: Request) -> dict:
-    session, caller = _agent_backup_access(session_id, request)
+    session, caller = await _agent_access(session_id, request, "backup")
     return await mooi.fetch_backups(caller, session.project_id)
 
 
 @router.get("/sessions/{session_id}/backup/agent/backups/{backup_id}")
 async def agent_backup_detail(session_id: UUID, backup_id: UUID, request: Request) -> dict:
-    session, caller = _agent_backup_access(session_id, request)
+    session, caller = await _agent_access(session_id, request, "backup")
     return await mooi.fetch_backup_detail(caller, session.project_id, backup_id)
 
 
 @router.post("/sessions/{session_id}/backup/agent/backups", status_code=status.HTTP_202_ACCEPTED)
 async def agent_test_backup(session_id: UUID, request: Request) -> BackupSnapshot:
-    session, caller = _agent_backup_access(session_id, request)
+    session, caller = await _agent_access(session_id, request, "backup")
     project = await mooi.fetch_project(caller, session.project_id)
     return await _admit_backup_operation(_backup_run(caller, project.id), caller, project, "backup", chat=session)
 
@@ -3381,7 +3875,7 @@ async def agent_test_backup(session_id: UUID, request: Request) -> BackupSnapsho
 @router.post("/sessions/{session_id}/backup/agent/restores", status_code=status.HTTP_202_ACCEPTED)
 async def agent_test_restore(session_id: UUID, request: Request, body: AgentRestoreRequest) -> BackupSnapshot:
     """Always the disposable verification instance: the agent can never restore into production."""
-    session, caller = _agent_backup_access(session_id, request)
+    session, caller = await _agent_access(session_id, request, "backup")
     project = await mooi.fetch_project(caller, session.project_id)
     backup = await _find_backup(caller, project.id, body.backupId)
     return await _admit_backup_operation(_backup_run(caller, project.id), caller, project, "restore",
@@ -3391,12 +3885,47 @@ async def agent_test_restore(session_id: UUID, request: Request, body: AgentRest
 @router.get("/sessions/{session_id}/backup/agent/operation")
 async def agent_backup_operation(session_id: UUID, request: Request, wait: int = 0) -> dict:
     """The live operation snapshot and its latest output, optionally waiting while it runs."""
-    session, caller = _agent_backup_access(session_id, request)
+    session, caller = await _agent_access(session_id, request, "backup")
     run = _backup_run(caller, session.project_id)
     task = run.task
     if wait > 0 and run.snapshot.state == "running" and task is not None and not task.done():
         await asyncio.wait({task}, timeout=min(wait, 120))
     return {"snapshot": run.snapshot.model_dump(mode="json"), "output": run.logs[-200:]}
+
+
+_RECONCILE_INTERVAL_SECONDS = 300
+_RECONCILE_RETRY_SECONDS = 30
+_reconciler_task: asyncio.Task[None] | None = None
+
+
+def _active_operations(runs: Iterable[ProductionRun | BackupRun]) -> list[UUID]:
+    return [run.snapshot.operationId for run in runs
+            if run.snapshot.state == "running" and run.snapshot.operationId is not None]
+
+
+async def _reconcile_loop() -> None:
+    """This process is the only runner of production and backup scripts, so a persisted run it does not
+    hold is over: orphaned by a restart or crash, or its outcome could not be saved. Sweeping from
+    boot, then periodically, turns those into failures instead of runs that look alive forever."""
+    while True:
+        try:
+            interrupted = (await mooi.reconcile_production_deployments(_active_operations(_production_runs.values()))
+                           + await mooi.reconcile_backup_operations(_active_operations(_backup_runs.values())))
+            if interrupted:
+                LOG.info("Marked %d orphaned production or backup runs as interrupted", interrupted)
+            delay = _RECONCILE_INTERVAL_SECONDS
+        except Exception:
+            LOG.debug("Run reconciliation is unavailable; retrying", exc_info=True)
+            delay = _RECONCILE_RETRY_SECONDS
+        await asyncio.sleep(delay)
+
+
+def start_reconciler() -> None:
+    """Starts the background run reconciler. Called once from `main.py`'s `lifespan` on startup;
+    `close_all` cancels it again on shutdown."""
+    global _reconciler_task
+    if _reconciler_task is None:
+        _reconciler_task = asyncio.create_task(_reconcile_loop())
 
 
 async def close_backups() -> None:
@@ -3405,17 +3934,17 @@ async def close_backups() -> None:
     for task in tasks:
         task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
-    for run in _backup_runs.values():
-        run.log.close()
 
 
 # --- deployment: the agent sets it up and tests it in the chat, then Compose runs it directly ----
 #
 # Deploy on a session without a verified setup clears the chat and sends the setup brief as a visible
 # message, like merge conflicts: the agent prepares the root Docker Compose and ends with a test
-# through the token-guarded agent endpoints, which run the very same deterministic deployment. Once a
-# start succeeds, or when a root Compose file exists before any start, Deploy runs directly until one
-# fails again. Changing the setup sends the same brief with the user's request.
+# through the token-guarded agent endpoints, which run the very same deterministic deployment. Once
+# that test passes, the project records it (`mic-mooi`) and every one of its sessions holding a root
+# Compose file runs Deploy directly until a start fails again; a Compose file alone never does. Changing the setup sends the same brief with the user's request. Asking for it in the
+# chat converges on the same path: the session's standing instructions make the agent read that very
+# brief from `deployment/agent/brief`, which shows the same "preparing" state.
 
 
 _WEB_DEPENDENCIES = ("vite", "react", "vue", "@angular/core", "next")
@@ -3514,10 +4043,15 @@ def _deployment_prompt(session: Session, instructions: str | None = None) -> str
             f"```\n{tail}\n```\n" if tail else "")
     request = (f"\n## Requested change\nApply this change to the existing setup, keeping everything else working:\n"
                f"{instructions.strip()}\n") if instructions else ""
-    return f"""Set up this repository so Mooi deploys it as a live web preview, then test it.
+    return f"""Set up this repository's development deployment system, which Mooi runs as a live web preview of each session, then test it.
 
-The working directory is this session's branch `{session.branch}`. This conversation only prepares the deployment. When a setup already exists, check it and finish or repair it instead of recreating a working one.
+The working directory is this session's branch `{session.branch}`. This conversation only prepares the development deployment. When a setup already exists, check it and finish or repair it instead of recreating a working one.
 {request}{failure}
+## Scope: development only, independent
+- This setup serves development only: Mooi session previews and local runs of the same root Compose file. It is never a production deployment.
+- Keep it independent from every other deployment system and correlated with none: production deployments (anything under `deploy/production/`, production Compose files, release or deploy scripts, CI/CD workflows) and local tooling such as a Makefile or scripts. Never edit, rename, delete, include, extend or reference their files, and never change what they rely on.
+- When the existing root Compose file belongs to another system (for example production: release variables, domains, registries, external networks), leave it untouched and create a dedicated development `compose.yaml`, which Mooi resolves first.
+
 ## How Mooi deploys
 - It resolves the single Compose file at the repository root (`compose.yaml`, `compose.yml`, `docker-compose.yaml` or `docker-compose.yml`), with the root `.env` when present and the project's development environment variables (`MOOI_DEVELOPMENT_<NAME>`) for interpolation.
 - It builds every service with a `build` section and starts all of them in a Compose project of its own: volumes, networks and images are renamed per session, so previews of any session never collide, and all of them are removed when the session is deleted.
@@ -3530,7 +4064,7 @@ The working directory is this session's branch `{session.branch}`. This conversa
 ## Rules
 1. Read the root AGENTS.md/CLAUDE.md and the instructions that apply to the files you edit.
 2. Give each deployable artifact its own Dockerfile at its root, with a `.dockerignore`, dependency cache layers, slim or alpine multistage images, and frontends built as static files without dev servers or HMR.
-3. Keep ONE root Compose file that builds those Dockerfiles through `build.context` and `build.dockerfile`. Databases and caches run as services with named volumes and credentials you choose yourself; give every variable an explicit literal value or, for what the user provides (third-party API keys, tokens, service URLs...), a project development variable such as `${{MOOI_DEVELOPMENT_OPENAI_API_KEY}}`.
+3. Keep ONE self-contained root Compose file (no `include`, `extends` or override files) that builds those Dockerfiles through `build.context` and `build.dockerfile`. Databases and caches run as services with named volumes and credentials you choose yourself; give every variable an explicit literal value or, for what the user provides (third-party API keys, tokens, service URLs...), a project development variable such as `${{MOOI_DEVELOPMENT_OPENAI_API_KEY}}`.
 4. Prefer one public frontend port: a static server that proxies the API routes to the backend by its Compose service name, and a frontend that calls the API through same-origin routes. Build the frontend for its public base path: pass `${{MOOI_PREVIEW_BASE_PATH:-/}}` as a build argument (the default keeps production at the root) and use it as the bundler base (Vite `base`, Next `basePath`, Angular `baseHref`...), the router basename and the prefix of every API, asset and WebSocket URL. Accept any Host header (no host allowlists) and never hard-code localhost or absolute origins.
 5. Every service listens on 0.0.0.0 and has a healthcheck on an existing endpoint or a TCP/process check against 127.0.0.1, never localhost. Never add endpoints, dependencies or authentication exceptions for it.
 6. Do not use `container_name`, `env_file`, `profiles`, bind mounts, external networks or volumes, `privileged`, host networking or the Docker socket.
@@ -3538,7 +4072,7 @@ The working directory is this session's branch `{session.branch}`. This conversa
 8. Never run `docker` or `docker compose` yourself and do not commit or push: the test endpoint runs the deployment.
 
 ## Mooi deployment API
-Use Python urllib with an inline JSON body, never a temporary file, and send the header `X-Deployment-Token: {session.agent_token}`:
+Use Python urllib with an inline JSON body, never a temporary file, and send the header `X-Mooi-Agent-Token: {session.agent_token}`:
 - `POST {base}/start` with an empty JSON body `{{}}`: runs Mooi's deployment of the working tree exactly as the Deploy button does, replacing the running preview if any, and returns its snapshot. The user follows its output in the deployment console.
 - `GET {base}?wait=120`: waits up to 120 seconds while the deployment starts, then returns its snapshot (`state` starting, running or failed; `phase`; `result.reason` on failure) and the latest redacted output. Repeat it while the state is starting.
 
@@ -3577,7 +4111,7 @@ async def _admit_deployment_start(session: Session, *, by_agent: bool = False) -
                                       updatedAt=datetime.now(UTC))
         # The event-loop cannot execute the worker until this lock scope has returned.
         record(session, EVENT_DEPLOYMENT_UPDATED, snapshot.model_dump())
-        _touch_activity(session, snapshot.updatedAt)
+        _touch(session, snapshot.updatedAt)
         session.deployment_task = _spawn(session, _run_deployment_start(session, operation_id))
         return snapshot
 
@@ -3691,6 +4225,7 @@ def _deployment_finish(session: Session, operation_id: UUID, action: DeploymentA
         session.deployment_verified = reason is None
         if reason is None and session.deployment_setup == "preparing":
             record(session, EVENT_DEPLOYMENT_SETUP, {"state": "tested"})
+            _mark_deployment_ready(session)
 
 
 def _deployment_storage() -> DockerManifests:
@@ -3765,7 +4300,7 @@ async def _run_deployment_start(session: Session, operation_id: UUID) -> None:
         async with asyncio.timeout_at(deadline):
             docker, manifests = Docker(), _deployment_storage()
             # The project's development environment, for Compose interpolation only.
-            variables = (await _development_environment(session.agent_caller, session.project_id)
+            variables = (await _development_environment(await _agent_caller(session), session.project_id)
                          if session.agent_caller is not None else development_environment())
             log.protect(variables.values())
             # Known before the build: the frontend is built for the public path it will be served at.
@@ -3834,6 +4369,8 @@ async def start_deployment(session_id: UUID, caller: Annotated[Caller, Depends(c
     project = await mooi.fetch_project(caller, session.project_id)
     if not project.web_application:
         raise ApiException.conflict("Deploy and preview are only available for web applications")
+    # Another pod's session may have completed the setup since this one started.
+    session.deployment_ready = session.deployment_ready or project.development_deployment_ready
     if _deployment_configured(session):
         return await _admit_deployment_start(session)
     return await _admit_deployment_setup(session, caller)
@@ -3854,10 +4391,26 @@ async def change_deployment_setup(session_id: UUID, body: DeploymentSetupRequest
 
 
 def _deployment_configured(session: Session) -> bool:
-    """A successful start proves the setup and a failed one hands it back to the agent; with neither,
-    a root Compose file means it was set up before (another session, a merge, a restart)."""
-    present = _sync_deployment_configured(session)
-    return session.deployment_verified if session.deployment_verified is not None else present
+    """Deploy runs directly only once the project's setup passed its test and the workspace holds a
+    root Compose file; a failed start hands the setup back to the agent."""
+    return _sync_deployment_configured(session) and session.deployment_verified is not False
+
+
+def _mark_deployment_ready(session: Session) -> None:
+    """The setup passed its test: every live session of the project deploys directly from now on,
+    and the project remembers it across sessions and restarts. No await: called from the finish."""
+    for peer in get_registry().list_for(session.player_id, session.project_id):
+        if peer.kind == "session" and not peer.deployment_ready:
+            peer.deployment_ready = True
+            _sync_deployment_configured(peer)
+    _spawn(session, _persist_deployment_ready(session.project_id))
+
+
+async def _persist_deployment_ready(project_id: UUID) -> None:
+    try:
+        await mooi.mark_development_deployment_ready(project_id)
+    except Exception:
+        LOG.warning("Project %s could not record its development deployment setup", project_id, exc_info=True)
 
 
 async def _admit_deployment_setup(session: Session, caller: Caller, instructions: str | None = None) -> DeploymentSnapshot:
@@ -3880,26 +4433,30 @@ async def _admit_deployment_setup(session: Session, caller: Caller, instructions
         runtime = await _reset_conversation(session, caller)
         record(session, EVENT_DEPLOYMENT_SETUP, {"state": "preparing"})
         await _deliver(session, runtime, prompt)
-        _touch_activity(session)
+        _touch(session)
         return session.deployment
 
 
-def _agent_deployment_access(session_id: UUID, request: Request) -> Session:
-    """Only the agent of a live setup conversation, from inside the pod, with the chat's token."""
-    session = get_registry().get(session_id)
-    token = request.headers.get("X-Deployment-Token", "")
-    if (request.client is None or request.client.host not in ("127.0.0.1", "::1")
-            or session is None or session.kind != "session" or session.closing
-            or session.deployment_setup is None
-            or not hmac.compare_digest(token, session.agent_token)):
-        raise ApiException.not_found("Deployment setup not found")
-    return session
+@router.get("/sessions/{session_id}/deployment/agent/brief")
+async def agent_deployment_brief(session_id: UUID, request: Request) -> dict:
+    """The development deployment brief for a setup asked in the chat: the same text the Deploy button
+    sends, and the same visible setup state."""
+    session, caller = await _agent_access(session_id, request, "session")
+    project = await mooi.fetch_project(caller, session.project_id)
+    if not project.web_application:
+        raise ApiException.conflict("Deploy and preview are only available for web applications")
+    if session.deployment_setup != "preparing":
+        record(session, EVENT_DEPLOYMENT_SETUP, {"state": "preparing"})
+    return {"brief": _deployment_prompt(session)}
 
 
 @router.post("/sessions/{session_id}/deployment/agent/start", status_code=status.HTTP_202_ACCEPTED)
 async def agent_start_deployment(session_id: UUID, request: Request) -> DeploymentSnapshot:
     """The setup's test: the same deployment Deploy runs, replacing a running or leftover one first."""
-    session = _agent_deployment_access(session_id, request)
+    session, caller = await _agent_access(session_id, request, "session")
+    project = await mooi.fetch_project(caller, session.project_id)
+    if not project.web_application:
+        raise ApiException.conflict("Deploy and preview are only available for web applications")
     async with session.operation_lock:
         if session.closing:
             raise ApiException.conflict("The session is closing")
@@ -3915,7 +4472,7 @@ async def agent_start_deployment(session_id: UUID, request: Request) -> Deployme
 @router.get("/sessions/{session_id}/deployment/agent")
 async def agent_deployment(session_id: UUID, request: Request, wait: int = 0) -> dict:
     """The deployment snapshot and its latest output, optionally waiting while it starts."""
-    session = _agent_deployment_access(session_id, request)
+    session, _ = await _agent_access(session_id, request, "session")
     task = session.deployment_task
     if wait > 0 and session.deployment.state == "starting" and task is not None and not task.done():
         await asyncio.wait({task}, timeout=min(wait, 120))
@@ -3966,33 +4523,20 @@ def _admit_deployment_stop(session: Session) -> DeploymentSnapshot:
                                   cleanupRequired=session.deployment.cleanupRequired,
                                   updatedAt=datetime.now(UTC))
     record(session, EVENT_DEPLOYMENT_UPDATED, snapshot.model_dump())
-    _touch_activity(session, snapshot.updatedAt)
+    _touch(session, snapshot.updatedAt)
     if previous is not None and not previous.done():
         previous.cancel()
     session.deployment_task = _spawn(session, _run_deployment_stop(session, operation_id, previous))
     return snapshot
 
 
-def _touch_activity(session: Session, at: datetime | None = None) -> None:
-    session.last_human_activity = at or datetime.now(UTC)
-    session.updated_at = session.last_human_activity
-
-
-@router.post("/sessions/{session_id}/activity", status_code=status.HTTP_204_NO_CONTENT)
-async def session_activity(session_id: UUID, caller: Annotated[Caller, Depends(current_caller)]) -> Response:
-    session = get_registry().get_for(caller, session_id)
-    if session.closing:
-        raise ApiException.conflict("The session is closing")
-    now = asyncio.get_running_loop().time()
-    if (session.activity_heartbeat_at is None
-            or now - session.activity_heartbeat_at >= get_settings().session_activity_interval_seconds):
-        session.activity_heartbeat_at = now
-        _touch_activity(session)
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+def _touch(session: Session, at: datetime | None = None) -> None:
+    """Bumps the display `updated_at` for a user action that records no event of its own."""
+    session.updated_at = at or datetime.now(UTC)
 
 
 async def _monitor_deployment(session: Session, operation_id: UUID) -> None:
-    """One bounded read per interval; never restart, invoke AI, or renew human activity."""
+    """One bounded read per interval; never restart nor invoke AI."""
     while not session.closing and session.deployment.state == "running" and session.deployment.operationId == operation_id:
         await asyncio.sleep(get_settings().deployment_monitor_interval_seconds)
         if session.closing or session.deployment.state != "running" or session.deployment.operationId != operation_id:
@@ -4014,52 +4558,17 @@ async def _monitor_deployment(session: Session, operation_id: UUID) -> None:
 # --- lifecycle safety --------------------------------------------------------------------------
 
 
-async def _reap_idle_sessions() -> None:
-    """Reap only ready/failed sessions; never expire active turns or pending user input."""
-    settings = get_settings()
-    timeout = timedelta(minutes=settings.session_idle_timeout_minutes)
-    cutoff = datetime.now(UTC) - timeout
-    idle = [session.id for session in get_registry().all()
-            if session.status in (STATUS_READY, STATUS_FAILED) and session.last_human_activity < cutoff]
-    for session_id in idle:
-        session = get_registry().get(session_id)
-        if session is None:
-            continue
-        async with session.operation_lock:
-            # Earlier cleanup may have awaited Docker while this session received activity.
-            if (not session.closing and session.status in (STATUS_READY, STATUS_FAILED)
-                    and session.last_human_activity < cutoff):
-                LOG.info("Session %s reaped after %s idle", session_id, timeout)
-                await _close_registered_session(session)
-
-
-async def _reaper_loop() -> None:
-    settings = get_settings()
-    interval = max(60, settings.session_idle_timeout_minutes * 60 // 4)
-    while True:
-        await asyncio.sleep(interval)
-        with suppress(Exception):
-            await _reap_idle_sessions()
-
-
-def start_reaper() -> None:
-    """Starts the background idle reaper. Called once from `main.py`'s `lifespan` on startup;
-    `close_all` cancels it again on shutdown."""
-    global _reaper_task
-    if _reaper_task is None:
-        _reaper_task = asyncio.create_task(_reaper_loop())
-
-
 async def close_all() -> None:
     """Closes every live session — runtime disconnect and workspace removal, via `close_session` —
-    and stops the reaper. Called once from `main.py`'s `lifespan` on shutdown."""
-    global _reaper_task
-    if _reaper_task is not None:
-        _reaper_task.cancel()
+    and stops the reconciler. Called once from `main.py`'s `lifespan` on shutdown."""
+    global _reconciler_task
+    if _reconciler_task is not None:
+        _reconciler_task.cancel()
         with suppress(asyncio.CancelledError):
-            await _reaper_task
-        _reaper_task = None
+            await _reconciler_task
+    _reconciler_task = None
     for session in get_registry().all():
         await close_session(session.id)
     await close_productions()
     await close_backups()
+    _channels.close()

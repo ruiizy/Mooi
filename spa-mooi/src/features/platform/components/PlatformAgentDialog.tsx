@@ -38,7 +38,7 @@ export const PlatformAgentDialog = ({ copy, projectName, connections, busy, erro
   const submit = () => {
     if (!valid || busy) return;
     dictation.finish();
-    onSubmit({ provider: choice.provider, connectionId: choice.connectionId, model: choice.model,
+    onSubmit({ provider: choice.provider, adapter: choice.adapter || undefined, connectionId: choice.connectionId, model: choice.model,
       effort: choice.effort || null, message: buildMessage(prompt) });
   };
 
@@ -64,7 +64,7 @@ export const PlatformAgentDialog = ({ copy, projectName, connections, busy, erro
       {/* On phones the request comes first: it is what the dialog is for, the agent defaults rarely change. */}
       {connections.length > 0 ? <label className="flex flex-col gap-2 max-sm:order-first">
         <span className="text-xs font-medium text-ink-muted">{copy.label}</span>
-        <div className="rounded-[12px] border border-line bg-surface-2 transition focus-within:border-brand/50">
+        <div className="rounded-xl border border-line bg-surface-2 transition focus-within:border-brand/50">
           <textarea ref={promptRef} autoFocus rows={5} value={prompt} disabled={busy} onChange={(event) => setPrompt(event.target.value)}
             onKeyDown={onKeyDown} placeholder={copy.placeholder} maxLength={20000}
             className="block min-h-28 w-full resize-y bg-transparent p-3.5 text-sm leading-6 sm:min-h-32 text-ink placeholder:text-ink-subtle focus:outline-none disabled:opacity-60" />
@@ -84,8 +84,8 @@ export const PlatformAgentDialog = ({ copy, projectName, connections, busy, erro
         </div> : null}
       </label> : null}
 
-      {replaceNotice ? <p className="rounded-[10px] bg-surface-2 px-3.5 py-2.5 text-xs leading-relaxed text-ink-muted">{replaceNotice}</p> : null}
-      {error ? <p role="alert" className="rounded-[10px] border border-danger/30 bg-danger-soft px-4 py-2.5 text-sm text-danger">{error}</p> : null}
+      {replaceNotice ? <p className="rounded-control bg-surface-2 px-3.5 py-2.5 text-xs leading-relaxed text-ink-muted">{replaceNotice}</p> : null}
+      {error ? <p role="alert" className="rounded-control border border-danger/30 bg-danger-soft px-4 py-2.5 text-sm text-danger">{error}</p> : null}
     </div>
   </Modal>;
 };

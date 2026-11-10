@@ -7,6 +7,8 @@ import type { DictationTarget } from '@/features/dictation/types/DictationTarget
  * edit made by someone else makes the field diverge from what this slice expects, and from then on
  * it never writes again — the dictation can lose its text, the user can never lose theirs. Text
  * dictated right after a word gets a separating space, so consecutive dictations never glue.
+ * Cursor movement alone does not release the slice: every transcript update reveals its end,
+ * including repeated partials and a final result identical to the last partial.
  */
 export class LiveTranscript {
   private readonly target: DictationTarget;
@@ -27,6 +29,7 @@ export class LiveTranscript {
 
   private get expected(): string {
     const { original, start, end } = this.target;
+    if (!this.changed) return original;
     return original.slice(0, start) + this.rendered + original.slice(end);
   }
 
@@ -39,13 +42,16 @@ export class LiveTranscript {
   update(text: string): boolean {
     if (!this.writable()) return false;
     const slice = text ? this.separator + text : '';
-    if (slice === this.rendered) return true;
+    if (!this.changed && !slice) return true;
     const { element, original, start, end } = this.target;
     const available = element.maxLength < 0 ? Infinity : element.maxLength - (original.length - (end - start));
     if (slice.length > available) return false;
-    setNativeValue(element, original.slice(0, start) + slice + original.slice(end));
-    this.rendered = slice;
-    this.changed = true;
+    if (slice !== this.rendered) {
+      setNativeValue(element, original.slice(0, start) + slice + original.slice(end));
+      this.rendered = slice;
+      this.changed = true;
+    }
+    // Even unchanged text must bring dictation back into view after the user moves the cursor.
     element.setSelectionRange(this.caret, this.caret);
     revealCaret(element);
     return true;

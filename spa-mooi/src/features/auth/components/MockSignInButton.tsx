@@ -16,7 +16,7 @@ interface MockSignInButtonProps {
 export const MockSignInButton = ({ onCredential, busy = false }: MockSignInButtonProps) => (
   <button
     type="button"
-    className={buttonStyles('primary', 'lg', 'w-full')}
+    className={buttonStyles('brand', 'lg', 'w-full')}
     disabled={busy}
     onClick={() => onCredential(MOCK_CREDENTIAL)}
     title="Development sign-in: Google is mocked"

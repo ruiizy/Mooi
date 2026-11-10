@@ -6,7 +6,6 @@ import { ProtectedRoute } from '@/shared/router/ProtectedRoute';
 import { RoleRoute } from '@/shared/router/RoleRoute';
 import { AccountPage } from '@/pages/AccountPage';
 import { AdminPage } from '@/pages/AdminPage';
-import { AgentCallbackPage } from '@/pages/AgentCallbackPage';
 import { GithubCallbackPage } from '@/pages/GithubCallbackPage';
 import { LoginPage } from '@/pages/LoginPage';
 import { NotFoundPage } from '@/pages/NotFoundPage';
@@ -14,6 +13,7 @@ import { ProjectPage } from '@/pages/ProjectPage';
 import { ProjectsPage } from '@/pages/ProjectsPage';
 import { SessionPage } from '@/pages/SessionPage';
 import { SessionsPage } from '@/pages/SessionsPage';
+import { TodosPage } from '@/pages/TodosPage';
 import { DeploymentsPage } from '@/pages/DeploymentsPage';
 import { ProjectDeploymentPage } from '@/pages/ProjectDeploymentPage';
 import { BackupsPage } from '@/pages/BackupsPage';
@@ -44,13 +44,13 @@ export const router = createBrowserRouter([
           { path: ROUTES.project, element: <ProjectPage /> },
           { path: ROUTES.session, element: <SessionPage />, handle: immersive },
           { path: ROUTES.sessions, element: <SessionsPage /> },
+          { path: ROUTES.todos, element: <TodosPage /> },
           { path: ROUTES.deployments, element: <DeploymentsPage /> },
           { path: ROUTES.deployment, element: <ProjectDeploymentPage />, handle: immersive },
           { path: ROUTES.backups, element: <BackupsPage /> },
           { path: ROUTES.backup, element: <ProjectBackupPage />, handle: immersive },
           { path: ROUTES.account, element: <AccountPage /> },
           { path: ROUTES.githubCallback, element: <GithubCallbackPage /> },
-          { path: ROUTES.agentCallback, element: <AgentCallbackPage /> },
           {
             element: <RoleRoute role="admin" />,
             children: [{ path: ROUTES.admin, element: <AdminPage /> }],

@@ -40,6 +40,6 @@ export const BackupDeleteDialog = ({ backup, canRunScript, onClose, onDelete, on
       <li>Remove the record only when its data is already gone, e.g. a backup that failed before storing anything.</li>
       {!canRunScript ? <li className="text-danger">delete.sh cannot run now: wait for the running operation, or set up backups again.</li> : null}
     </ul>
-    {error ? <p role="alert" className="mt-4 rounded-[10px] border border-danger/30 bg-danger-soft px-4 py-2.5 text-sm text-danger">{error}</p> : null}
+    {error ? <p role="alert" className="mt-4 rounded-control border border-danger/30 bg-danger-soft px-4 py-2.5 text-sm text-danger">{error}</p> : null}
   </Modal>;
 };

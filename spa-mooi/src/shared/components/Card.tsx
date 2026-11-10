@@ -9,5 +9,5 @@ interface CardProps {
 }
 
 export const Card = ({ children, className, as: Tag = 'div' }: CardProps) => (
-  <Tag className={cn('min-w-0 rounded-[14px] border border-line bg-surface', className)}>{children}</Tag>
+  <Tag className={cn('min-w-0 rounded-card border border-line bg-surface shadow-card', className)}>{children}</Tag>
 );

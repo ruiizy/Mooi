@@ -21,7 +21,7 @@ export const PlatformEnvironmentCard = ({ variables, emptyDescription, onEdit }:
     <Card as="section" className="flex flex-col">
       <header className="flex items-center justify-between gap-3 border-b border-line px-5 py-4">
         <div className="min-w-0">
-          <h2 className="flex items-center gap-2 text-sm font-extrabold text-ink"><KeyRound className="size-4 text-ink-subtle" />Environment</h2>
+          <h2 className="flex items-center gap-2 text-sm font-semibold text-ink"><KeyRound className="size-4 text-ink-subtle" />Environment</h2>
           <p className="mt-0.5 text-xs text-ink-muted">{missing > 0 ? `${missing} required value${missing === 1 ? '' : 's'} missing` : 'Encrypted in the platform'}</p>
         </div>
         <Button variant="secondary" size="sm" onClick={onEdit}><Settings2 className="size-4" />Manage</Button>

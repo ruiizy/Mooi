@@ -1,10 +1,10 @@
 import type { AuthPlayer } from '@/features/auth/types/AuthPlayer';
-import type { AuthSession } from '@/features/auth/types/AuthSession';
 
 export interface AuthState {
   player: AuthPlayer | null;
-  session: AuthSession | null;
-  setSession: (player: AuthPlayer, session: AuthSession) => void;
+  /** Set when the sign-out was caused by a suspension; read once by the login page. Not persisted. */
+  suspended: boolean;
+  signIn: (player: AuthPlayer) => void;
   setPlayer: (player: AuthPlayer) => void;
-  clear: () => void;
+  clear: (options?: { suspended?: boolean }) => void;
 }

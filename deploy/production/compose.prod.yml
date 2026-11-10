@@ -1,6 +1,6 @@
 # Mooi production stack behind the host's Traefik (external `proxy` network, Cloudflare DNS-01
-# certificates, `intranet-firewall` allow list). Driven by tools/deploy-production.sh; values come from
-# the env file documented in .env.example.
+# certificates, `intranet-firewall` allow list). Driven by tools/deploy-production.sh or the Mooi platform's
+# production deployment; values come from the env file documented in .env.example.
 #
 #   https://${DOMAIN} -> spa-mooi nginx: SPA + /api/mooi + /api/sessions + /api/stt + /preview
 #
@@ -12,6 +12,10 @@
 #
 # Production uses its own `mooi-prod` project and data. Development stacks use root compose.yml
 # with each session's assigned COMPOSE_PROJECT_NAME and generated resource names and ports.
+#
+# Container and internal network names follow the project name, and the defaulted MOOI_* knobs below
+# (Traefik routing, proxy and previews networks) let a verification run start this same file as a
+# disjoint stack: own project, data directory, networks and secrets, nothing routed or published.
 
 name: mooi-prod
 
@@ -39,7 +43,7 @@ services:
 
   postgres:
     image: postgres:18-alpine
-    container_name: mooi-prod-postgres
+    container_name: ${COMPOSE_PROJECT_NAME}-postgres
     restart: unless-stopped
     environment:
       POSTGRES_DB: mooi
@@ -64,7 +68,9 @@ services:
     build:
       context: ../../mic-mooi
     image: mooi/mic-mooi:${MOOI_RELEASE:-latest}
-    container_name: mooi-prod-mic-mooi
+    labels:
+      dev.mooi.production.sha: ${MOOI_RELEASE:-latest}
+    container_name: ${COMPOSE_PROJECT_NAME}-mic-mooi
     restart: unless-stopped
     environment:
       SERVER_PORT: "8080"
@@ -98,7 +104,9 @@ services:
     build:
       context: ../../mic-sessions
     image: mooi/mic-sessions:${MOOI_RELEASE:-latest}
-    container_name: mooi-prod-mic-sessions
+    labels:
+      dev.mooi.production.sha: ${MOOI_RELEASE:-latest}
+    container_name: ${COMPOSE_PROJECT_NAME}-mic-sessions
     restart: unless-stopped
     # tini reaps the agent, Git and Docker CLI children the service spawns.
     init: true
@@ -114,7 +122,7 @@ services:
       SESSION_IDLE_TIMEOUT_MINUTES: ${SESSION_IDLE_TIMEOUT_MINUTES:-180}
       MAX_DEPLOYMENTS: ${MAX_DEPLOYMENTS:-4}
       PREVIEW_UPSTREAM: network
-      PREVIEW_NETWORK: mooi-previews
+      PREVIEW_NETWORK: ${MOOI_PREVIEWS_NETWORK:-mooi-previews}
       AGENT_CLAUDE_MODEL: ${AGENT_CLAUDE_MODEL:-sonnet}
       AGENT_CLAUDE_EFFORT: ${AGENT_CLAUDE_EFFORT:-high}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -144,14 +152,15 @@ services:
         VITE_SPEECH_BASE_URL: https://${DOMAIN:?}
         VITE_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:?}
     image: mooi/spa-mooi:${MOOI_RELEASE:-latest}
-    container_name: mooi-prod-spa-mooi
+    container_name: ${COMPOSE_PROJECT_NAME}-spa-mooi
     restart: unless-stopped
     networks:
       - internal
       - proxy
     labels:
-      - traefik.enable=true
-      - traefik.docker.network=proxy
+      - dev.mooi.production.sha=${MOOI_RELEASE:-latest}
+      - traefik.enable=${MOOI_TRAEFIK_ENABLE:-true}
+      - traefik.docker.network=${MOOI_PROXY_NETWORK:-proxy}
       - traefik.http.routers.mooi.rule=Host(`${DOMAIN:?}`)
       - traefik.http.routers.mooi.entrypoints=websecure
       - traefik.http.routers.mooi.tls=true
@@ -167,7 +176,9 @@ services:
     build:
       context: ../../mic-speech
     image: mooi/mic-speech:${MOOI_RELEASE:-latest}
-    container_name: mooi-prod-mic-speech
+    labels:
+      dev.mooi.production.sha: ${MOOI_RELEASE:-latest}
+    container_name: ${COMPOSE_PROJECT_NAME}-mic-speech
     restart: unless-stopped
     network_mode: service:spa-mooi
     environment:
@@ -188,9 +199,10 @@ services:
 
 networks:
   internal:
-    name: mooi-prod-internal
+    name: ${COMPOSE_PROJECT_NAME}-internal
   proxy:
+    name: ${MOOI_PROXY_NETWORK:-proxy}
     external: true
   previews:
-    name: mooi-previews
+    name: ${MOOI_PREVIEWS_NETWORK:-mooi-previews}
     external: true

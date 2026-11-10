@@ -14,21 +14,35 @@ export const useGithubConnectionSync = (): void => {
   useEffect(() => {
     let cancelled = false;
 
-    useGithubStore.getState().setStatus('loading');
-    fetchGithubConnection()
-      .then((connection) => {
-        if (!cancelled) {
-          useGithubStore.getState().setConnection(connection);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          useGithubStore.getState().setError('Could not load your GitHub connection.');
-        }
-      });
+    const load = () => {
+      useGithubStore.getState().setStatus('loading');
+      fetchGithubConnection()
+        .then((connection) => {
+          if (!cancelled) {
+            useGithubStore.getState().setConnection(connection);
+          }
+        })
+        .catch(() => {
+          if (!cancelled) {
+            useGithubStore.getState().setError('Could not load your GitHub connection.');
+          }
+        });
+    };
+
+    // Coming back from github.com with the Back button restores this page from the back/forward
+    // cache, frozen mid-redirect: re-read the link so the connect button never stays stuck busy.
+    const onPageShow = (event: PageTransitionEvent) => {
+      if (event.persisted) {
+        load();
+      }
+    };
+
+    load();
+    window.addEventListener('pageshow', onPageShow);
 
     return () => {
       cancelled = true;
+      window.removeEventListener('pageshow', onPageShow);
     };
   }, []);
 };

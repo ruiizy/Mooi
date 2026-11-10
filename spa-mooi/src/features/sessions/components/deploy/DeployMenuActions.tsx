@@ -21,7 +21,7 @@ export const DeployMenuActions = ({ control, dismiss }: DeployMenuActionsProps) 
     <div className="sm:hidden">
       <p className="px-3 pt-1.5 pb-1 text-[10.5px] font-bold tracking-[0.06em] text-ink-subtle uppercase">Preview</p>
       {control.failure ? (
-        <p role="status" className="mx-1 mb-1 line-clamp-3 rounded-[8px] bg-danger-soft px-2.5 py-1.5 text-[11.5px] leading-snug text-danger">
+        <p role="status" className="mx-1 mb-1 line-clamp-3 rounded-chip bg-danger-soft px-2.5 py-1.5 text-[11.5px] leading-snug text-danger">
           {control.failure}
         </p>
       ) : null}

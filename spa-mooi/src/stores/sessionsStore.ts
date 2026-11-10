@@ -7,14 +7,21 @@ import type { SessionsState } from '@/stores/types/SessionsState';
 
 /**
  * Deliberately not persisted — server state, same reasoning as `agentsStore`/`projectsStore`.
- * `sessions` is the list surface (project screen, headers); `byId` is the live transcript per
- * session, folded from its SSE stream by `applySessionEvent` — the store never assigns transcript
- * chat state directly, only replays events through it. Preview visit metadata and the Compose
- * log live alongside the transcript; the authoritative deployment snapshot lives only in sessions.
+ * `sessions` is the list surface (project screen, headers), kept live by the player's channel;
+ * `byId` is the live transcript per session, folded from its SSE stream by `applySessionEvent` — the
+ * store never assigns transcript chat state directly, only replays events through it. Preview visit
+ * metadata and the Compose log live alongside the transcript; the authoritative deployment snapshot
+ * lives only in sessions.
  */
 const mergeSession = (current: Session | undefined, incoming: Session): Session => current
   ? { ...(current.lastSeq >= incoming.lastSeq ? current : incoming), deployment: mergeDeployment(current.deployment, incoming.deployment) }
   : incoming;
+
+/** A session someone is looking at stays on screen, closed, instead of vanishing under them. */
+const watched = (state: SessionsState, sessionId: string): boolean =>
+  state.byId[sessionId]?.streamState === 'open' || state.byId[sessionId]?.streamState === 'reconnecting';
+
+const closed = (session: Session): Session => ({ ...session, status: 'closed', pending: null });
 
 export const useSessionsStore = create<SessionsState>((set, get) => ({
   sessions: [],
@@ -28,25 +35,16 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     byId: { ...state.byId, [sessionId]: { ...(state.byId[sessionId] ?? emptyTranscriptState()), deploymentLogOpen: open } },
   })),
 
-  setSessions: (sessions) => set((state) => ({ sessions: sessions.map((session) =>
-    mergeSession(state.sessions.find((current) => current.id === session.id), session)) })),
-
-  // A session created while the list was in flight is missing from it but must survive, live
-  // transcript included: only sessions the store already held at request time can be dropped.
-  syncSessions: (sessions, projectId, knownIds) => set((state) => {
-    const inScope = (session: Session) => !projectId || session.projectId === projectId;
+  syncSessions: (sessions) => set((state) => {
     const incomingIds = new Set(sessions.map((session) => session.id));
-    const removed = state.sessions.filter((session) => inScope(session) && !incomingIds.has(session.id)
-      && (!knownIds || knownIds.has(session.id)));
-    const removedIds = new Set(removed.map((session) => session.id));
+    const gone = state.sessions.filter((session) => !incomingIds.has(session.id));
     const byId = { ...state.byId };
-    removed.forEach((session) => delete byId[session.id]);
+    gone.filter((session) => !watched(state, session.id)).forEach((session) => delete byId[session.id]);
     return {
       byId,
       sessions: [
         ...sessions.map((session) => mergeSession(state.sessions.find((current) => current.id === session.id), session)),
-        ...state.sessions.filter((session) => !inScope(session)
-          || (!incomingIds.has(session.id) && !removedIds.has(session.id))),
+        ...gone.filter((session) => watched(state, session.id)).map(closed),
       ],
     };
   }),
@@ -60,17 +58,25 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     byId: { ...state.byId, [sessionId]: { ...(state.byId[sessionId] ?? emptyTranscriptState()), previewOpenedOperationId: operationId } },
   })),
 
+  // In place: a known session keeps its position; a new one belongs at the top, like the server's order.
   upsertSession: (session) =>
-    set((state) => ({
-      sessions: [mergeSession(state.sessions.find((current) => current.id === session.id), session),
-        ...state.sessions.filter((current) => current.id !== session.id)],
-    })),
+    set((state) => state.sessions.some((current) => current.id === session.id)
+      ? { sessions: state.sessions.map((current) => (current.id === session.id ? mergeSession(current, session) : current)) }
+      : { sessions: [session, ...state.sessions] }),
 
   removeSession: (sessionId) =>
     set((state) => {
       const { [sessionId]: _removed, ...rest } = state.byId;
       return { sessions: state.sessions.filter((session) => session.id !== sessionId), byId: rest };
     }),
+
+  retireSession: (sessionId) => {
+    if (!watched(get(), sessionId)) {
+      get().removeSession(sessionId);
+      return;
+    }
+    set((state) => ({ sessions: state.sessions.map((session) => (session.id === sessionId ? closed(session) : session)) }));
+  },
 
   ensureTranscript: (sessionId) => {
     if (get().byId[sessionId]) {

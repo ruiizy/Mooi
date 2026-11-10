@@ -1,0 +1,12 @@
+{
+ "condition": "mooi-cli",
+ "state": "done",
+ "launched": 1794254681.757206,
+ "updated": 1794255385.936018,
+ "session": "b084f0a0-8bdb-46be-8315-d536d2af828d",
+ "started": 1794254728.1992269,
+ "other_mooi_sessions": [],
+ "finished": 1794254863.6762261,
+ "done": 1794255385.934934,
+ "raw_source": "docker cp of the CLI transcript (pre-rebuild container had no /trace/logs)"
+}

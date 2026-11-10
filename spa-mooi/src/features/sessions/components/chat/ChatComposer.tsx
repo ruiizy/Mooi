@@ -23,6 +23,7 @@ import type { ParsedSlashCommand } from '@/features/sessions/types/ParsedSlashCo
 import type { SlashCommand } from '@/features/sessions/types/SlashCommand';
 import { Button } from '@/shared/components/Button';
 import { cn } from '@/shared/utils/cn';
+import { compactInstructions } from '@/features/sessions/lib/compactCommand';
 
 interface ChatComposerProps {
   status: SessionStatus;
@@ -43,7 +44,7 @@ interface ChatComposerProps {
   /** The session failed with its agent and workspace intact: offer to reconnect it. */
   recoverable?: boolean;
   onRecover: () => Promise<boolean>;
-  onCompact: () => Promise<boolean>;
+  onCompact: (instructions?: string) => Promise<boolean>;
   onClear: () => Promise<boolean>;
   /** The agent answers `/btw` side questions, even while a turn runs. */
   canAskAside?: boolean;
@@ -122,7 +123,13 @@ export const ChatComposer = ({
   const canAttach = acceptsImages && !blocked && !draft.full;
   const readyImages = draft.images.filter((image) => image.status === 'ready');
   const hasImages = draft.images.length > 0;
-  const sendable = (value.trim().length > 0 || readyImages.length > 0) && !draft.preparing && !(hasImages && imagesReason);
+  // `/compact [instructions]`: what the summary should preserve or condense, if anything.
+  const instructions = compactInstructions(value);
+  const compactReason = instructions === null ? null
+    : hasImages ? 'Remove attached images before compacting.'
+    : !hasConversation ? 'Start a conversation before compacting.'
+    : instructions.length > 10_000 ? 'Keep compaction instructions under 10,000 characters.' : null;
+  const sendable = (value.trim().length > 0 || readyImages.length > 0) && !draft.preparing && !(hasImages && imagesReason) && !compactReason;
   const commands = slashCommands.filter((command) => command.name !== 'btw' || canAskAside);
   const suggestions = blocked ? [] : matchSlashCommands(value, commands);
   const menuOpen = suggestions.length > 0 && menuDismissedOn !== value;
@@ -175,8 +182,12 @@ export const ChatComposer = ({
       return;
     }
     if (blocked || activeTurn || busy || status !== 'ready' || !hasConversation) return;
+    if (name === 'compact' && compactReason) return;
     dictation.finish();
-    if (await (name === 'compact' ? onCompact() : onClear())) setValue('');
+    if (await (name === 'compact' ? onCompact(argument || undefined) : onClear())) {
+      setValue('');
+      resetHeight();
+    }
   };
 
   const pick = (picked: SlashCommand) => {
@@ -210,7 +221,7 @@ export const ChatComposer = ({
   };
 
   return (
-    <div className="mx-auto w-full max-w-[60rem] shrink-0 bg-surface px-2.5 pt-2 pb-[max(0.625rem,var(--safe-bottom))] sm:px-8 sm:pt-3 sm:pb-6">
+    <div className="mx-auto w-full max-w-[60rem] shrink-0 px-2.5 pt-2 pb-[max(0.625rem,var(--safe-bottom))] sm:px-8 sm:pt-3 sm:pb-6">
       <div
         onDragEnter={onDragOver}
         onDragOver={onDragOver}
@@ -223,7 +234,7 @@ export const ChatComposer = ({
           setDragging(false);
           attach(imageFilesFrom(event.dataTransfer));
         }}
-        className={cn('relative rounded-2xl border bg-surface-2 transition focus-within:border-ink',
+        className={cn('relative rounded-[20px] border bg-surface shadow-raised transition-[border-color,box-shadow] duration-200 focus-within:border-brand/50 focus-within:ring-4 focus-within:ring-brand/10',
           dragging ? 'border-brand' : 'border-line')}
       >
         {dragging ? (
@@ -285,7 +296,8 @@ export const ChatComposer = ({
               submit();
             }
           }}
-          placeholder={hint ? undefined : 'Describe the next change, or type / for commands'}
+          placeholder={hint ? undefined : 'Describe the next change, or type / for commands…'}
+          aria-describedby={instructions !== null ? 'compact-instructions-hint' : undefined}
           aria-label="Message the agent"
           aria-autocomplete="list"
           aria-controls={menuOpen ? menuId : undefined}
@@ -294,6 +306,9 @@ export const ChatComposer = ({
           data-compose
           className="max-h-[min(12rem,25dvh)] w-full resize-none bg-transparent px-4 pt-3 text-base leading-relaxed keyboard:max-h-32 sm:px-5 sm:pt-4 text-ink placeholder:text-ink-subtle focus:outline-none disabled:cursor-not-allowed"
         />
+        {instructions !== null ? <p id="compact-instructions-hint" role="status" className="px-4 pb-2 text-xs text-ink-muted sm:px-5">
+          {compactReason ?? 'Optional instructions: what should the summary preserve or condense? Leave empty for standard compaction.'}
+        </p> : null}
         {hint ? <p role="status" className="px-4 pb-2 text-xs text-ink-muted sm:px-5">{hint}</p> : null}
         {imageStatus ? <p role="status" className="px-4 pb-2 text-xs text-warning sm:px-5">{imageStatus}</p> : null}
 
@@ -345,7 +360,7 @@ export const ChatComposer = ({
           </div>
 
           <div className="ml-auto flex shrink-0 items-center gap-1 sm:gap-1.5">
-            {!activeTurn && !blocked ? <span className="mr-1 hidden text-xs text-ink-subtle lg:flex">Enter to send · Shift+Enter for a new line</span> : null}
+            {!activeTurn && !blocked ? <span className="mr-1 hidden items-center gap-1 text-[11px] text-ink-subtle lg:flex"><kbd className="rounded border border-line bg-surface-2 px-1 font-mono text-[10px]">Enter</kbd> to send · <kbd className="rounded border border-line bg-surface-2 px-1 font-mono text-[10px]">Shift</kbd>+<kbd className="rounded border border-line bg-surface-2 px-1 font-mono text-[10px]">Enter</kbd> new line</span> : null}
 
             {acceptsImages && !blocked ? (
               <AttachImageButton onPick={attach} disabled={!canAttach} reason={imagesReason} className="max-sm:size-10" />

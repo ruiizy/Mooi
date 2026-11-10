@@ -18,11 +18,11 @@ interface ProductionHistoryCardProps {
 export const ProductionHistoryCard = ({ deployments, loading, error, canRedeploy, onOpen, onRedeploy }: ProductionHistoryCardProps) => (
   <Card as="section" className="flex flex-col overflow-hidden">
     <header className="flex items-center justify-between gap-3 border-b border-line px-5 py-4">
-      <h2 className="flex items-center gap-2 text-sm font-extrabold text-ink"><History className="size-4 text-ink-subtle" />Deployments</h2>
+      <h2 className="flex items-center gap-2 text-sm font-semibold text-ink"><History className="size-4 text-ink-subtle" />Deployments</h2>
       <span className="text-xs font-semibold text-ink-subtle tabular-nums">{deployments.length > 0 ? `${deployments.length} recent` : ''}</span>
     </header>
     {error ? <p role="alert" className="px-5 py-4 text-sm text-danger">{error}</p>
-      : loading && deployments.length === 0 ? <div className="m-5 h-24 animate-pulse-soft rounded-[12px] bg-surface-2" />
+      : loading && deployments.length === 0 ? <div className="m-5 h-24 animate-pulse-soft rounded-xl bg-surface-2" />
         : deployments.length === 0 ? <p className="px-5 py-6 text-sm text-ink-muted">Every deployment appears here with its files and output.</p>
           : <ul className="divide-y divide-line">
             {deployments.slice(0, 8).map((deployment) => <li key={deployment.operationId} className="group flex items-center gap-1 pr-3 transition hover:bg-surface-2">
@@ -39,7 +39,7 @@ export const ProductionHistoryCard = ({ deployments, loading, error, canRedeploy
               </button>
               {canRedeploy && deployment.state !== 'running' ? <button type="button" onClick={() => onRedeploy(deployment)}
                 aria-label={`Redeploy ${deployment.releaseTag}`} title={`Redeploy ${deployment.releaseTag}`}
-                className="grid size-9 shrink-0 place-items-center rounded-[10px] text-ink-subtle transition hover:bg-surface hover:text-ink focus-visible:outline-2 focus-visible:outline-brand">
+                className="grid size-9 shrink-0 place-items-center rounded-control text-ink-subtle transition hover:bg-surface hover:text-ink focus-visible:outline-2 focus-visible:outline-brand">
                 <RotateCcw className="size-4" /></button> : null}
             </li>)}
           </ul>}

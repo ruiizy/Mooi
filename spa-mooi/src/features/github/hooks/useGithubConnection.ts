@@ -40,8 +40,8 @@ export const useGithubConnection = (): UseGithubConnection => {
       .then((authorization) => {
         window.location.assign(authorization.authorizeUrl);
       })
-      .catch(() => {
-        useGithubStore.getState().setError('Could not start the GitHub authorization.');
+      .catch((error: unknown) => {
+        useGithubStore.getState().setError(error instanceof Error ? error.message : 'Could not start the GitHub authorization.');
       });
   }, []);
 
@@ -57,8 +57,8 @@ export const useGithubConnection = (): UseGithubConnection => {
       .then((authorization) => {
         window.location.assign(authorization.installUrl);
       })
-      .catch(() => {
-        useGithubStore.getState().setError('Could not open your GitHub repository access.');
+      .catch((error: unknown) => {
+        useGithubStore.getState().setError(error instanceof Error ? error.message : 'Could not open your GitHub repository access.');
       });
   }, []);
 

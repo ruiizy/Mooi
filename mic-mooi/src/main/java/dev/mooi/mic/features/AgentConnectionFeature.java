@@ -5,8 +5,10 @@ import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.http.HttpStatus;
@@ -30,6 +32,7 @@ import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.Id;
+import jakarta.persistence.LockModeType;
 import jakarta.persistence.Table;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
@@ -41,11 +44,12 @@ import lombok.Setter;
 /**
  * Feature: agent-provider credentials linked to a player.
  *
- * <p>A connection hands an agent-provider credential (a Claude personal access token today) to
- * {@code mic-sessions} on request; the browser never holds it. Both ways a player can obtain that
- * credential — OAuth2 or pasting a token minted by {@code claude setup-token}, see {@link Agents}
- * for why both yield the same kind of token — are recorded in the same table, distinguished only by
- * {@link Agents.Mode}.
+ * <p>A connection hands an agent-provider credential (a Claude OAuth access token, a Codex
+ * {@code auth.json}) to {@code mic-sessions} on request; the browser never holds it. Claude is linked by
+ * the Claude Code sign-in (OAuth2 + PKCE, the code pasted back from Anthropic's page), whose short-lived
+ * token this feature renews: it is the only holder of the refresh token, so concurrent sessions of one
+ * account never race to rotate it. Tokens pasted from {@code claude setup-token} keep working. Every
+ * mode is recorded in the same table, distinguished only by {@link Agents.Mode}.
  *
  * <p>Self-contained by architecture: API, application logic, persistence and contracts live in this
  * single file and may only import transversal aspects from {@code shared}.
@@ -69,7 +73,10 @@ public class AgentConnectionFeature {
         return agentConnectionService.startAuthorization(principal.player().id(), provider);
     }
 
-    /** The code is redeemed for the caller on this request, never for whoever the state claims. */
+    /**
+     * The code is redeemed for the caller on this request, never for whoever the state claims. It may
+     * arrive as Anthropic's callback page shows it, {@code code#state}.
+     */
     @PostMapping("/me/agents/{provider}/connection")
     @Auth.Authenticated
     public AgentConnectionPayload connectOauth(@PathVariable String provider,
@@ -174,8 +181,9 @@ public class AgentConnectionFeature {
         private final Crypto.SecretBox secretBox;
         private final Clock clock;
 
-        /** Both modes are always offered: whether OAuth is actually usable is a separate flag. */
+        /** Both modes are always offered: the SPA signs in when OAuth is enabled, else asks for a token. */
         private static final List<String> MODES = List.of(Agents.Mode.OAUTH.wire(), Agents.Mode.SETUP_TOKEN.wire());
+        private static final Pattern ADAPTER_ID = Pattern.compile("^[a-z0-9][a-z0-9_-]{0,31}$");
 
         /** One grant, whichever mode produced it. Fields absent for a mode are simply {@code null}. */
         private record Grant(String accessToken, OffsetDateTime accessTokenExpiresAt, String refreshToken,
@@ -208,7 +216,8 @@ public class AgentConnectionFeature {
                 throw Agents.AgentsException.oauthNotConfigured();
             }
             Agents.StateCodec.Issued issued = stateCodec.issue(playerId, agentProvider.id());
-            return new AuthorizationPayload(oauthClient.authorizeUrl(agentProvider, issued.state(), issued.codeChallenge()));
+            return new AuthorizationPayload(oauthClient.authorizeUrl(agentProvider, issued.state(), issued.codeChallenge()),
+                    issued.state());
         }
 
         /**
@@ -225,7 +234,18 @@ public class AgentConnectionFeature {
             if (!claims.playerId().equals(playerId) || !claims.provider().equals(provider)) {
                 throw Agents.AgentsException.invalidState();
             }
-            Agents.OAuthClient.Tokens grant = oauthClient.exchangeCode(agentProvider, code, claims.codeVerifier());
+            // Anthropic's page shows `code#state`: the state half must be the one this attempt minted.
+            String pasted = code.strip();
+            int separator = pasted.indexOf('#');
+            if (separator >= 0 && !pasted.substring(separator + 1).strip().equals(state)) {
+                throw Agents.AgentsException.invalidState();
+            }
+            String authorizationCode = separator >= 0 ? pasted.substring(0, separator).strip() : pasted;
+            if (authorizationCode.isEmpty()) {
+                throw Agents.AgentsException.invalidToken();
+            }
+            Agents.OAuthClient.Tokens grant = oauthClient.exchangeCode(agentProvider, authorizationCode, state,
+                    claims.codeVerifier());
             AgentConnection saved = create(playerId, agentProvider, Agents.Mode.OAUTH, toGrant(grant), name);
             Agents.LOG.info("Player {} linked agent provider {} ({})", playerId, agentProvider.id(),
                     Agents.Mode.OAUTH.wire());
@@ -237,10 +257,14 @@ public class AgentConnectionFeature {
          * stored token is handed out as is — it never expires and has no refresh token. For
          * {@code oauth} it is renewed first when it is within {@link Agents.Settings#getTokenRefreshSkew()}
          * of expiring, so a caller is never handed a credential that dies mid-flight.
+         *
+         * <p>The row is read under a write lock, held for this short transaction: the refresh token is
+         * single-use, so two sessions asking at once must not both spend it — the second one simply
+         * finds the renewed token. A failed renewal commits the {@code stale} mark it leaves behind.
          */
-        @Transactional
+        @Transactional(noRollbackFor = Agents.AgentsException.class)
         public CredentialPayload credential(UUID playerId, UUID connectionId) {
-            AgentConnection connection = agentConnectionRepository.findByPlayerIdAndId(playerId, connectionId)
+            AgentConnection connection = agentConnectionRepository.findLockedByPlayerIdAndId(playerId, connectionId)
                     .orElseThrow(Agents.AgentsException::reauthorize);
             Agents.Provider agentProvider = settings.find(connection.getProvider()).orElseThrow(Agents.AgentsException::unknownProvider);
             if (Agents.Mode.fromWire(connection.getMode()) == Agents.Mode.OAUTH) {
@@ -249,7 +273,8 @@ public class AgentConnectionFeature {
             EngineDefaults defaults = engineDefaultsRepository.findById(agentProvider.id()).orElseThrow();
             return new CredentialPayload(agentProvider.id(), connection.getMode(),
                     secretBox.decrypt(connection.getAccessToken()), connection.getAccessTokenExpiresAt(),
-                    connection.getCredentialId(), defaults.getSessionModel(), defaults.getSessionEffort());
+                    connection.getCredentialId(), defaults.getSessionModel(), defaults.getSessionEffort(),
+                    defaults.getSessionAdapter());
         }
 
         /**
@@ -318,6 +343,7 @@ public class AgentConnectionFeature {
             EngineDefaults defaults = engineDefaultsRepository.findById(provider).orElseThrow();
             defaults.setSessionModel(cleanModel(request.sessionModel()));
             defaults.setSessionEffort(cleanEffort(request.sessionEffort()));
+            defaults.setSessionAdapter(cleanAdapter(request.sessionAdapter()));
             return toDefaultsPayload(engineDefaultsRepository.save(defaults));
         }
 
@@ -338,7 +364,20 @@ public class AgentConnectionFeature {
         }
 
         private EngineDefaultsPayload toDefaultsPayload(EngineDefaults defaults) {
-            return new EngineDefaultsPayload(defaults.getProvider(), defaults.getSessionModel(), defaults.getSessionEffort());
+            return new EngineDefaultsPayload(defaults.getProvider(), defaults.getSessionModel(), defaults.getSessionEffort(),
+                    defaults.getSessionAdapter());
+        }
+
+        /**
+         * Adapters are registered in mic-sessions, so only the shape is checked here: an id it does not
+         * know (or no longer knows) simply falls back to the provider's first adapter there.
+         */
+        private String cleanAdapter(String value) {
+            if (value == null || value.isBlank()) return null;
+            String cleaned = value.strip();
+            if (!ADAPTER_ID.matcher(cleaned).matches())
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid adapter");
+            return cleaned;
         }
 
         private String cleanEffort(String value) {
@@ -391,8 +430,7 @@ public class AgentConnectionFeature {
          */
         private AgentConnection ensureFreshToken(AgentConnection connection, Agents.Provider provider) {
             OffsetDateTime expiresAt = connection.getAccessTokenExpiresAt();
-            OffsetDateTime now = OffsetDateTime.now(clock);
-            if (expiresAt == null || expiresAt.isAfter(now.plus(settings.getTokenRefreshSkew()))) {
+            if (expiresAt == null || expiresAt.isAfter(OffsetDateTime.now(clock).plus(settings.getTokenRefreshSkew()))) {
                 return connection;
             }
             String refreshToken = secretBox.decrypt(connection.getRefreshToken());
@@ -524,6 +562,8 @@ public class AgentConnectionFeature {
         private String sessionModel;
         @Column(name = "session_effort", length = 32)
         private String sessionEffort;
+        @Column(name = "session_adapter", length = 32)
+        private String sessionAdapter;
     }
 
     public interface EngineDefaultsRepository extends JpaRepository<EngineDefaults, String> { }
@@ -553,6 +593,11 @@ public class AgentConnectionFeature {
 
         Optional<AgentConnection> findByPlayerIdAndId(UUID playerId, UUID id);
 
+        /** Serializes renewals of one connection: see {@code AgentConnectionService#credential}. */
+        @Lock(LockModeType.PESSIMISTIC_WRITE)
+        @Query("select c from AgentConnection c where c.playerId = :playerId and c.id = :id")
+        Optional<AgentConnection> findLockedByPlayerIdAndId(UUID playerId, UUID id);
+
         // The identity check and update must be atomic with a concurrent disconnect/relink.
         @Modifying
         @Query("update AgentConnection c set c.accessToken = :token "
@@ -574,8 +619,11 @@ public class AgentConnectionFeature {
                                          boolean stale, boolean defaultAccount) {
     }
 
-    /** Where the browser sends the player to authorize. Nothing else is needed to complete the callback. */
-    public record AuthorizationPayload(String authorizeUrl) {
+    /**
+     * Where the browser sends the player to authorize, and the state to send back with the pasted code.
+     * The state is signed and carries the PKCE verifier, so the API keeps nothing between the two calls.
+     */
+    public record AuthorizationPayload(String authorizeUrl, String state) {
     }
 
     /**
@@ -583,7 +631,7 @@ public class AgentConnectionFeature {
      * payload in this feature, where a raw token is ever serialized.
      */
     public record CredentialPayload(String provider, String mode, String token, OffsetDateTime expiresAt, UUID connectionId,
-                                    String sessionModel, String sessionEffort) {
+                                    String sessionModel, String sessionEffort, String sessionAdapter) {
     }
 
     /** One provider this application knows how to link, and whether OAuth is actually usable for it. */
@@ -612,8 +660,9 @@ public class AgentConnectionFeature {
 
     public record DefaultAccountRequest(UUID connectionId) { }
 
-    public record EngineDefaultsPayload(String provider, String sessionModel, String sessionEffort) { }
+    public record EngineDefaultsPayload(String provider, String sessionModel, String sessionEffort,
+                                        String sessionAdapter) { }
 
-    public record DefaultModelsRequest(String sessionModel, String sessionEffort) {
+    public record DefaultModelsRequest(String sessionModel, String sessionEffort, String sessionAdapter) {
     }
 }

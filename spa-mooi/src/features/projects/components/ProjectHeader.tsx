@@ -95,7 +95,7 @@ export const ProjectHeader = ({ project, busy, onRemove }: ProjectHeaderProps) =
 
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5">
-            <h1 className="min-w-0 text-[24px] leading-tight font-extrabold tracking-[-0.035em] [overflow-wrap:anywhere] text-ink sm:text-[26px]">
+            <h1 className="min-w-0 text-[24px] leading-tight font-semibold tracking-[-0.035em] [overflow-wrap:anywhere] text-ink sm:text-[26px]">
               {project.name}
             </h1>
             <Badge tone={project.isPrivate ? 'neutral' : 'info'}>

@@ -17,7 +17,7 @@ interface BackupHistoryListProps {
 
 /** Every recorded backup across projects, newest first. */
 export const BackupHistoryList = ({ backups, projects, onOpen }: BackupHistoryListProps) => (
-  <ul className="divide-y divide-line overflow-hidden rounded-[14px] border border-line bg-surface">
+  <ul className="divide-y divide-line overflow-hidden rounded-card border border-line bg-surface">
     {backups.map((backup) => {
       const project = projects.get(backup.projectId);
       return <li key={backup.id} className="group flex items-center gap-1 pr-3 transition hover:bg-surface-2">
@@ -25,7 +25,7 @@ export const BackupHistoryList = ({ backups, projects, onOpen }: BackupHistoryLi
           className="flex min-w-0 flex-1 items-center gap-3 px-4 py-3.5 text-left focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-brand sm:px-5">
           <DeploymentStateIcon state={backup.state} />
           <span className="min-w-0 flex-1">
-            <span className="flex items-center gap-2 truncate text-sm font-extrabold text-ink">{project?.name ?? 'Removed project'}
+            <span className="flex items-center gap-2 truncate text-sm font-semibold text-ink">{project?.name ?? 'Removed project'}
               {backup.verifiedAt ? <ShieldCheck className="size-3.5 shrink-0 text-success" aria-label="Verified" /> : null}</span>
             <span className="mt-0.5 block truncate text-xs text-ink-muted">
               <span className="font-mono font-bold text-ink">{backup.releaseTag}</span> · {formatDate(backup.startedAt)} {formatTime(backup.startedAt)}
@@ -35,7 +35,7 @@ export const BackupHistoryList = ({ backups, projects, onOpen }: BackupHistoryLi
           <span className="hidden sm:block"><DeploymentStateBadge state={backup.state} /></span>
         </button>
         {project ? <Link to={backupPath(project.id)} aria-label={`Open ${project.name} backups`} title="Open project backups"
-          className="grid size-9 shrink-0 place-items-center rounded-[10px] text-ink-subtle transition hover:bg-surface hover:text-ink focus-visible:outline-2 focus-visible:outline-brand">
+          className="grid size-9 shrink-0 place-items-center rounded-control text-ink-subtle transition hover:bg-surface hover:text-ink focus-visible:outline-2 focus-visible:outline-brand">
           <ArrowRight className="size-4" /></Link> : null}
       </li>;
     })}

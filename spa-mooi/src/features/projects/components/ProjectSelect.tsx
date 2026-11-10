@@ -87,7 +87,7 @@ export const ProjectSelect = ({ projects, value, onChange, onImport, onCreate }:
           openAt(event.key === 'ArrowDown' ? 'first' : 'last');
         }
       }}
-      className="flex w-full items-center gap-3 rounded-[10px] border border-line bg-surface-2 px-3 py-2.5 text-left outline-none transition hover:border-line-strong focus-visible:border-brand">
+      className="flex w-full items-center gap-3 rounded-control border border-line bg-surface-2 px-3 py-2.5 text-left outline-none transition hover:border-line-strong focus-visible:border-brand">
       {selected ? <Initials value={selected.name} size="sm" /> : null}
       <span className="min-w-0 flex-1">
         <span className="block truncate text-sm font-semibold text-ink">{selected ? selected.name : 'Select a project'}</span>
@@ -97,7 +97,7 @@ export const ProjectSelect = ({ projects, value, onChange, onImport, onCreate }:
     </button>
     {open && createPortal(<div ref={popup} onKeyDown={navigate}
       style={{ position: 'fixed', top: placement.top, left: placement.left, width: placement.width, maxHeight: placement.maxHeight }}
-      className="z-50 flex flex-col overflow-hidden rounded-xl border border-line bg-surface shadow-[0_18px_40px_-16px_rgba(0,0,0,0.35)]">
+      className="z-50 flex flex-col overflow-hidden rounded-xl border border-line bg-surface shadow-pop">
       <div id={listId} role="listbox" aria-label="Projects" className="min-h-0 overflow-y-auto overscroll-contain p-1">
         {projects.length === 0 ? <p className="px-3 py-2.5 text-sm text-ink-muted">No projects yet. Add one below.</p> : null}
         {projects.map((project) => <button key={project.id} type="button" role="option" aria-selected={project.id === value}

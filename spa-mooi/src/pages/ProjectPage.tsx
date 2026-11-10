@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useNavigate, useParams, useSearchParams, Link } from 'react-router-dom';
-import { Compass, FolderGit2, MessagesSquare, Plus } from 'lucide-react';
+import { Compass, FolderGit2, ListTodo, MessagesSquare, Plus } from 'lucide-react';
 import { ROUTES } from '@/app/routes';
 import { sessionPath } from '@/app/paths';
 import { useAgentConnections } from '@/features/agents/hooks/useAgentConnections';
@@ -13,12 +13,13 @@ import { SessionList } from '@/features/sessions/components/SessionList';
 import { WorkspacesOverview } from '@/features/sessions/components/workspaces/WorkspacesOverview';
 import { useProjectSessions } from '@/features/sessions/hooks/useProjectSessions';
 import { useProjectWorkspaces } from '@/features/sessions/hooks/useProjectWorkspaces';
-import { useSessionsSync } from '@/features/sessions/hooks/useSessionsSync';
+import { TodosPanel } from '@/features/todos/components/TodosPanel';
 import { Card } from '@/shared/components/Card';
 import { EmptyState } from '@/shared/components/EmptyState';
 import { Button } from '@/shared/components/Button';
 import { Tabs } from '@/shared/components/Tabs';
 import { buttonStyles } from '@/shared/styles/buttonStyles';
+import { useLiveStore } from '@/stores/liveStore';
 
 /**
  * What Mooi knows about an imported repository, and nothing it does not.
@@ -26,9 +27,12 @@ import { buttonStyles } from '@/shared/styles/buttonStyles';
  * Deploy and preview live inside each session; whether sessions offer them is a project setting,
  * edited from the header.
  *
- * The active tab lives in `?tab=` so a reload lands back on the same view.
+ * The active tab lives in `?tab=` so a reload lands back on the same view. The to-do list is the
+ * repository's own `docs/TODOS.md`, so its tab reads and commits that file rather than any copy.
  */
 const WORKSPACES_TAB = 'workspaces';
+const TODOS_TAB = 'todos';
+const TABS = new Set([WORKSPACES_TAB, TODOS_TAB]);
 
 export const ProjectPage = () => {
   const { projectId } = useParams();
@@ -36,12 +40,13 @@ export const ProjectPage = () => {
   const { projects, status, busy, actionError: deleteError, clearActionError: clearDeleteError, remove } = useProjects();
   const project = findProject(projects, projectId);
   const { sessions, busy: sessionBusy, actionError, create, clearActionError } = useProjectSessions(project?.id);
-  useSessionsSync(project?.id, Boolean(project));
   const { connections } = useAgentConnections();
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [searchParams, setSearchParams] = useSearchParams();
-  const tab = searchParams.get('tab') === WORKSPACES_TAB ? WORKSPACES_TAB : 'sessions';
+  const requestedTab = searchParams.get('tab');
+  const tab = requestedTab && TABS.has(requestedTab) ? requestedTab : 'sessions';
+  const todos = useLiveStore((live) => (projectId ? live.todos[projectId] : undefined));
   const sessionsRevision = useMemo(
     () => sessions.map((session) => `${session.id}:${session.status}:${session.deployment.state}:${session.workspacePath ?? ''}`).join('|'),
     [sessions],
@@ -49,7 +54,7 @@ export const ProjectPage = () => {
   const workspaces = useProjectWorkspaces(tab === WORKSPACES_TAB ? project?.id : undefined, sessionsRevision);
 
   const handleTabChange = (next: string) =>
-    setSearchParams(next === WORKSPACES_TAB ? { tab: WORKSPACES_TAB } : {}, { replace: true });
+    setSearchParams(TABS.has(next) ? { tab: next } : {}, { replace: true });
 
   if (!project) {
     if (status === 'loading' || status === 'idle') {
@@ -114,10 +119,19 @@ export const ProjectPage = () => {
             icon: FolderGit2,
             count: sessions.filter((session) => session.workspacePath).length,
           },
+          {
+            id: TODOS_TAB,
+            label: 'To-dos',
+            icon: ListTodo,
+            // Open items, once the file was read: the tab never reaches GitHub before it is opened.
+            count: todos?.state === 'ready' ? todos.items.filter((item) => item.status !== 'done').length : undefined,
+          },
         ]}
       />
 
-      {tab === WORKSPACES_TAB ? (
+      {tab === TODOS_TAB ? (
+        <TodosPanel projectId={project.id} branch={project.defaultBranch ?? 'the default branch'} />
+      ) : tab === WORKSPACES_TAB ? (
         <WorkspacesOverview
           projectId={project.id}
           previewsEnabled={project.webApplication}

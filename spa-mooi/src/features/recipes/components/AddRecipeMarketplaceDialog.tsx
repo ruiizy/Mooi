@@ -29,7 +29,7 @@ export const AddRecipeMarketplaceDialog = ({ busy, actionError, onClose, onAdd }
       <form id="add-recipe-marketplace" className="flex flex-col gap-4" onSubmit={(event) => { event.preventDefault(); submit(); }}>
         <label className="flex flex-col gap-2">
           <span className="text-xs font-semibold text-ink-muted">Repository URL <span className="text-danger">*</span></span>
-          <span className="flex h-12 items-center gap-2 rounded-[10px] border border-line bg-surface-2 px-3 focus-within:border-brand">
+          <span className="flex h-12 items-center gap-2 rounded-control border border-line bg-surface-2 px-3 focus-within:border-brand">
             <Link2 className="size-4 shrink-0 text-ink-subtle" aria-hidden="true" />
             <input value={url} onChange={(event) => setUrl(event.target.value)} maxLength={512} required autoFocus
               inputMode="url" autoComplete="off" autoCapitalize="none" autoCorrect="off" spellCheck={false} placeholder="https://github.com/owner/agent-recipes"
@@ -41,7 +41,7 @@ export const AddRecipeMarketplaceDialog = ({ busy, actionError, onClose, onAdd }
           <pre className="mt-2 font-mono text-[11px] text-ink-subtle">{'recipes/\n  google_sso_login.md\n  rate_limiting.md'}</pre>
           <p className="mt-2">Each recipe starts with a front matter holding its <code>name</code> and <code>description</code>.</p>
         </div>
-        {actionError ? <p role="alert" className="rounded-[10px] border border-danger/30 bg-danger-soft px-4 py-2.5 text-sm text-danger">{actionError}</p> : null}
+        {actionError ? <p role="alert" className="rounded-control border border-danger/30 bg-danger-soft px-4 py-2.5 text-sm text-danger">{actionError}</p> : null}
       </form>
     </Modal>
   );

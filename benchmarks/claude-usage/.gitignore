@@ -1,0 +1,5 @@
+# Third-party project files stay local: the Leffi fixture and the raw transcripts/traces that embed its code.
+fixture/
+data/runs/*/raw/
+data/runs/*/mooi-trace.json
+data/invalid/

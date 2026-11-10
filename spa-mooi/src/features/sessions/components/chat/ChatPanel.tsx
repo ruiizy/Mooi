@@ -26,7 +26,7 @@ interface ChatPanelProps {
   onSend: (text: string, images?: PreparedImage[]) => Promise<boolean>;
   onInterrupt: () => Promise<boolean>;
   onRecover: () => Promise<boolean>;
-  onCompact: () => Promise<boolean>;
+  onCompact: (instructions?: string) => Promise<boolean>;
   onClear: () => Promise<boolean>;
   onConfigurationChange: (configuration: SessionConfiguration) => void;
   onAllowPermission: (requestId: string, updatedInput?: Record<string, unknown>) => void;

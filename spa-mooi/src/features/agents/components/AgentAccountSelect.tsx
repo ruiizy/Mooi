@@ -44,7 +44,7 @@ export const AgentAccountSelect = ({ connections, value, onChange }: AgentAccoun
           openAt(event.key === 'ArrowDown' ? 0 : connections.length - 1);
         }
       }}
-      className="flex w-full items-center gap-3 rounded-[10px] border border-line bg-surface-2 px-3 py-2.5 text-left outline-none transition hover:border-line-strong focus-visible:border-brand">
+      className="flex w-full items-center gap-3 rounded-control border border-line bg-surface-2 px-3 py-2.5 text-left outline-none transition hover:border-line-strong focus-visible:border-brand">
       <span className="min-w-0 flex-1">
         <span className="block truncate text-sm font-semibold text-ink">{selected ? titleFor(selected) : 'Select an account'}</span>
         {selected && <span className="block text-xs text-ink-subtle">{selected.label}</span>}
@@ -53,7 +53,7 @@ export const AgentAccountSelect = ({ connections, value, onChange }: AgentAccoun
     </button>
     {open && createPortal(<div ref={popup} id={listId} role="listbox" aria-label="Agent accounts"
       style={{ position: 'fixed', top: placement.top, left: placement.left, width: placement.width, maxHeight: placement.maxHeight }}
-      className="z-50 overflow-y-auto overscroll-contain rounded-xl border border-line bg-surface p-1 shadow-[0_18px_40px_-16px_rgba(0,0,0,0.35)]">
+      className="z-50 overflow-y-auto overscroll-contain rounded-xl border border-line bg-surface p-1 shadow-pop">
       {connections.map((account, index) => <button key={account.id} ref={(element) => { options.current[index] = element; }}
         type="button" role="option" aria-selected={account.id === value}
         onClick={() => { onChange(account.id); setOpen(false); root.current?.querySelector<HTMLButtonElement>('[aria-haspopup="listbox"]')?.focus(); }}

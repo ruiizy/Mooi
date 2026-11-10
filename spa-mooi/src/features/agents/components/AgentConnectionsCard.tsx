@@ -3,6 +3,7 @@ import { Bot, Pencil, Plus, RefreshCw, Star, TriangleAlert, Unlink } from 'lucid
 import { AddAgentAccountDialog } from '@/features/agents/components/AddAgentAccountDialog';
 import { useAgentConnections } from '@/features/agents/hooks/useAgentConnections';
 import type { AgentConnection } from '@/features/agents/types/AgentConnection';
+import type { AgentProvider } from '@/features/agents/types/AgentProvider';
 import { Button } from '@/shared/components/Button';
 import { Card } from '@/shared/components/Card';
 import { Modal } from '@/shared/components/Modal';
@@ -11,8 +12,12 @@ import { cn } from '@/shared/utils/cn';
 
 const accountTitle = (connection: AgentConnection) => connection.name || connection.accountLabel || connection.label;
 
+/** A pasted `claude setup-token` token is deprecated wherever the provider's sign-in is offered. */
+const usesLegacyToken = (connection: AgentConnection, providers: AgentProvider[]) =>
+  connection.mode === 'setup_token' && providers.some((provider) => provider.id === connection.provider && provider.oauthEnabled);
+
 export const AgentConnectionsCard = () => {
-  const { providers, connections, status, error, busy, actionError, startOauth, connectToken,
+  const { providers, connections, status, error, busy, actionError, connectToken,
     disconnect, rename, setDefaultAccount, reload, clearActionError } = useAgentConnections();
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<AgentConnection | null>(null);
@@ -21,7 +26,7 @@ export const AgentConnectionsCard = () => {
   return <Card className="p-5 sm:p-6">
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div>
-        <h2 className="text-sm font-extrabold tracking-[-0.02em] text-ink">Agent accounts</h2>
+        <h2 className="text-sm font-semibold tracking-[-0.015em] text-ink">Agent accounts</h2>
         <p className="mt-1 text-xs text-ink-subtle">Set the account preselected for new agent sessions.</p>
       </div>
       <Button variant="secondary" size="sm" disabled={busy || providers.length === 0}
@@ -54,7 +59,12 @@ export const AgentConnectionsCard = () => {
             {connection.label}
             {connection.defaultAccount && <span className="font-semibold text-brand">Default</span>}
             {connection.stale && <span className="inline-flex items-center gap-1 text-warning"><TriangleAlert className="size-3" /> Needs attention</span>}
+            {usesLegacyToken(connection, providers) && <span className="inline-flex items-center gap-1 text-warning"><TriangleAlert className="size-3" /> Deprecated</span>}
           </p>
+          {usesLegacyToken(connection, providers) && <p className="mt-1 text-xs text-ink-muted">
+            Linked with a setup token, a deprecated method: it expires and cannot be renewed. Add this account
+            again with {connection.label} sign-in, then disconnect this one.
+          </p>}
         </div>
         {/* Icon actions keep the account name readable on phones; the labels live in title and aria-label. */}
         <div className="flex shrink-0 items-center gap-1.5">
@@ -80,7 +90,7 @@ export const AgentConnectionsCard = () => {
     {actionError && !adding && !editing && <p role="alert" className="mt-4 text-sm text-danger">{actionError}</p>}
 
     {adding && <AddAgentAccountDialog providers={providers} busy={busy} actionError={actionError}
-      onClose={() => setAdding(false)} onConnected={reload} onConnectToken={connectToken} onStartOauth={startOauth} />}
+      onClose={() => setAdding(false)} onConnected={reload} onConnectToken={connectToken} />}
 
     <Modal open={editing !== null} onClose={() => setEditing(null)} title="Rename account"
       description="Choose a title to recognize this account."
@@ -92,7 +102,7 @@ export const AgentConnectionsCard = () => {
       </>}>
       <label className="flex flex-col gap-2 text-xs font-semibold text-ink-muted">Account title
         <input value={name} onChange={(event) => setName(event.target.value)} maxLength={100} required autoFocus
-          className="h-12 rounded-[10px] border border-line bg-surface-2 px-3 text-sm text-ink outline-none focus:border-brand" />
+          className="h-12 rounded-control border border-line bg-surface-2 px-3 text-sm text-ink outline-none focus:border-brand" />
       </label>
       {editing && actionError && <p role="alert" className="mt-3 text-sm text-danger">{actionError}</p>}
     </Modal>

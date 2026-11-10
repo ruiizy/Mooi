@@ -43,7 +43,7 @@ export const ProductionHero = ({ project, stage, hasChat, missingVariables, rele
           <div className="flex min-w-0 items-center gap-3.5">
             <Initials value={project.name} size="lg" />
             <div className="min-w-0">
-              <h1 className="truncate text-[22px] leading-tight font-extrabold tracking-[-0.035em] text-ink sm:text-[26px]">{project.name}</h1>
+              <h1 className="truncate text-[22px] leading-tight font-semibold tracking-[-0.035em] text-ink sm:text-[26px]">{project.name}</h1>
               {project.htmlUrl ? <a href={project.htmlUrl} target="_blank" rel="noreferrer"
                 className="mt-0.5 inline-flex max-w-full items-center gap-1.5 font-mono text-[11px] text-ink-subtle transition hover:text-ink">
                 <span className="truncate">{project.fullName}</span><ExternalLink className="size-3 shrink-0" /></a>

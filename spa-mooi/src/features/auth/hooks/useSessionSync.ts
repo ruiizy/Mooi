@@ -3,15 +3,16 @@ import { fetchCurrentPlayer } from '@/features/auth/api/currentPlayerApi';
 import { useAuthStore } from '@/stores/authStore';
 
 /**
- * Re-checks the session on mount and whenever the tab regains focus, so a tab
- * revoked elsewhere drops to the login screen the moment it is looked at again.
+ * Re-reads the profile on mount and whenever the tab regains focus, so a profile changed elsewhere
+ * shows up. It never signs out: a revoked sign-in is detected by the token provider (a 401 on renewal),
+ * and a failure here is far more often the network than the session.
  */
 export const useSessionSync = (): void => {
   useEffect(() => {
     let cancelled = false;
 
     const sync = () => {
-      if (!useAuthStore.getState().session) {
+      if (!useAuthStore.getState().player) {
         return;
       }
 
@@ -21,11 +22,7 @@ export const useSessionSync = (): void => {
             useAuthStore.getState().setPlayer(player);
           }
         })
-        .catch(() => {
-          if (!cancelled) {
-            useAuthStore.getState().clear();
-          }
-        });
+        .catch(() => {});
     };
 
     const onVisibility = () => {

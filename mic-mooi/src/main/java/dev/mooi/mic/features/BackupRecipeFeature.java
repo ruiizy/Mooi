@@ -63,11 +63,11 @@ public class BackupRecipeFeature {
         return service.draft(projectId, principal.player().id(), body);
     }
 
-    @PostMapping("/me/projects/{projectId}/backups/recipe/publish")
-    @Auth.Authenticated
-    @Auth.ServiceCall
-    public RecipePayload publish(@PathVariable UUID projectId, Auth.Principal principal) {
-        return service.publish(projectId, principal.player().id());
+    /** Service-only: a draft is published once a run proves it, which may outlive the player's access token. */
+    @PostMapping("/internal/projects/{projectId}/backups/recipe/publish")
+    @Auth.ServiceOnly
+    public RecipePayload publish(@PathVariable UUID projectId) {
+        return service.publish(projectId);
     }
 
     @DeleteMapping("/me/projects/{projectId}/backups/recipe")
@@ -146,8 +146,7 @@ public class BackupRecipeFeature {
         }
 
         @Transactional
-        public RecipePayload publish(UUID projectId, UUID playerId) {
-            requireProject(projectId, playerId);
+        public RecipePayload publish(UUID projectId) {
             Recipe row = recipes.findById(projectId).orElseThrow(() ->
                     new ResponseStatusException(HttpStatus.CONFLICT, "No backup configuration exists"));
             if (row.getDraftBackupScript() == null) {

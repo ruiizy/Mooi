@@ -34,12 +34,12 @@ export const TapTooltip = ({ label, content, children, className, duration = 400
   return (
     <div ref={root} className={cn('relative min-w-0', className)}>
       <button type="button" aria-label={label} aria-expanded={open} aria-describedby={open ? id : undefined} onClick={toggle}
-        className="block w-full min-w-0 rounded-[8px] text-left transition active:opacity-70 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand">
+        className="block w-full min-w-0 rounded-chip text-left transition active:opacity-70 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand">
         {children}
       </button>
       {open ? (
         <div id={id} role="tooltip"
-          className="absolute top-full left-0 z-50 mt-2 w-max max-w-[calc(100vw-1.5rem)] origin-top-left animate-menu-in rounded-xl border border-line-strong bg-surface px-3 py-2.5 text-ink shadow-[0_12px_32px_-8px_rgb(0_0_0/0.3)] dark:shadow-[0_12px_32px_-8px_rgb(0_0_0/0.7)]">
+          className="absolute top-full left-0 z-50 mt-2 w-max max-w-[calc(100vw-1.5rem)] origin-top-left animate-menu-in rounded-xl border border-line-strong bg-surface px-3 py-2.5 text-ink shadow-pop">
           {content}
         </div>
       ) : null}

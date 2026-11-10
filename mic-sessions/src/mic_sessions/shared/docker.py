@@ -363,8 +363,15 @@ def _freeze_compose(model: dict, checkout: Path, project: str, web_service: str)
     for name, service in services.items():
         if not isinstance(service, dict):
             unsupported()
+        # Sharing a sibling's network namespace (a loopback-only sidecar) stays inside the project;
+        # the web service keeps its own networks, which the preview endpoint extends.
+        network_mode = service.get("network_mode")
+        if network_mode:
+            kind, _, sibling = str(network_mode).partition(":")
+            if name == web_service or kind != "service" or sibling == name or sibling not in services:
+                unsupported()
         if any(service.get(key) for key in (
-            "network_mode", "volumes_from", "external_links", "configs", "secrets",
+            "volumes_from", "external_links", "configs", "secrets",
             "devices", "device_cgroup_rules", "privileged", "pid", "ipc", "uts",
             "use_api_socket", "provider", "develop", "env_file", "label_file",
             "extends", "credential_spec", "post_start", "pre_stop",

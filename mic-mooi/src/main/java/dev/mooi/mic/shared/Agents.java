@@ -1,7 +1,6 @@
 package dev.mooi.mic.shared;
 
 import java.io.IOException;
-import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
@@ -27,7 +26,6 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.stream.Collectors;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -66,10 +64,12 @@ import lombok.Getter;
  * state of its own.
  *
  * <p>"Agent provider" means a coding-agent vendor a player brings their own subscription to (Claude
- * first). Every mode this aspect knows about yields the same shape of credential: a long-lived
- * personal access token, whether it arrived through OAuth2 or was pasted from
- * {@code claude setup-token}. Anthropic API keys are explicitly out of scope: the product is "bring
- * your Claude subscription", not "bring your API billing".
+ * first). Claude is linked exactly like the Claude Code application signs in: OAuth2 with PKCE against
+ * Claude Code's own public client, the authorization code shown by Anthropic's callback page and pasted
+ * back into Mooi. Every mode yields a Claude OAuth access token, so a session runs it the same way
+ * whether it came from that sign-in (short-lived, renewed here) or from {@code claude setup-token}
+ * (long-lived, kept for existing links). Anthropic API keys are explicitly out of scope: the product is
+ * "bring your Claude subscription", not "bring your API billing".
  *
  * <p>Self-contained by architecture, which is why the TTL grammar is parsed here rather than
  * borrowed from {@link Github}: transversal aspects do not depend on each other, so a small,
@@ -86,9 +86,10 @@ public class Agents {
     // --- contracts ---
 
     /**
-     * How a credential was obtained. Both modes yield the same kind of token — a Claude PAT — so
-     * nothing downstream branches on this beyond recording it: it exists purely so a player can see,
-     * and repair, how their link was made.
+     * How a credential was obtained. {@code oauth} and {@code setup_token} yield the same kind of token
+     * — a Claude OAuth access token — so only renewal branches on it: an {@code oauth} token expires and
+     * is refreshed by this platform, a {@code setup_token} one does not. {@code device_oauth} is a
+     * Codex {@code auth.json}.
      */
     public enum Mode {
 
@@ -187,13 +188,23 @@ public class Agents {
      * Every agent-provider variable, read and validated at boot: a malformed TTL fails the
      * application start instead of the first link attempt.
      *
-     * <p>URLs are validated only when a provider both declares OAuth enabled and has a client id
-     * configured: the paste-a-token mode must keep working with the whole OAuth block left empty.
+     * <p>Claude's OAuth client is not configuration: Anthropic registers no third-party clients, so
+     * Mooi signs in as Claude Code itself — its public client id, its scopes and its manual-code
+     * callback, the one redirect that works from any origin (Anthropic shows the code, the player
+     * pastes it). Only whether that sign-in is offered stays an operator switch.
      */
     @Component
     public static class Settings {
 
         private static final String CLAUDE_ENV_VAR = "CLAUDE_CODE_OAUTH_TOKEN";
+        private static final String CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+        /** {@code code=true} makes the callback page display the code to paste instead of redirecting. */
+        private static final String CLAUDE_AUTHORIZE_URI = "https://claude.com/cai/oauth/authorize?code=true";
+        private static final String CLAUDE_TOKEN_URI = "https://platform.claude.com/v1/oauth/token";
+        private static final String CLAUDE_REDIRECT_URI = "https://platform.claude.com/oauth/code/callback";
+        /** The scopes of a Claude Code subscription sign-in, so sessions get every capability it has. */
+        private static final String CLAUDE_SCOPES = "org:create_api_key user:profile user:inference "
+                + "user:sessions:claude_code user:mcp_servers user:file_upload user:plugins";
 
         @Getter
         private final Duration stateExpiresIn;
@@ -206,12 +217,7 @@ public class Agents {
         Settings(@Value("${app.agents.state-expires-in}") String stateExpiresIn,
                  @Value("${app.agents.token-refresh-skew}") String tokenRefreshSkew,
                  @Value("${app.agents.request-timeout-ms}") long requestTimeoutMs,
-                 @Value("${app.agents.claude.enabled}") boolean claudeOauthEnabled,
-                 @Value("${app.agents.claude.client-id:}") String claudeClientId,
-                 @Value("${app.agents.claude.authorize-uri:}") String claudeAuthorizeUri,
-                 @Value("${app.agents.claude.token-uri:}") String claudeTokenUri,
-                 @Value("${app.agents.claude.scopes:}") String claudeScopes,
-                 @Value("${app.agents.claude.redirect-uri:}") String claudeRedirectUri) {
+                 @Value("${app.agents.claude.enabled}") boolean claudeOauthEnabled) {
             this.stateExpiresIn = parseDuration(stateExpiresIn, "AGENT_STATE_EXPIRES_IN");
             this.tokenRefreshSkew = parseDuration(tokenRefreshSkew, "AGENT_TOKEN_REFRESH_SKEW");
             if (requestTimeoutMs <= 0) {
@@ -219,14 +225,8 @@ public class Agents {
             }
             this.requestTimeout = Duration.ofMillis(requestTimeoutMs);
 
-            Provider claude = new Provider("claude", "Claude", claudeOauthEnabled, blankToNull(claudeClientId),
-                    blankToNull(claudeAuthorizeUri), blankToNull(claudeTokenUri), blankToNull(claudeScopes),
-                    blankToNull(claudeRedirectUri), CLAUDE_ENV_VAR);
-            if (claude.oauthEnabled() && claude.clientId() != null) {
-                validUrl(claude.authorizeUri(), "AGENT_CLAUDE_AUTHORIZE_URI");
-                validUrl(claude.tokenUri(), "AGENT_CLAUDE_TOKEN_URI");
-                validUrl(claude.redirectUri(), "AGENT_CLAUDE_REDIRECT_URI");
-            }
+            Provider claude = new Provider("claude", "Claude", claudeOauthEnabled, CLAUDE_CLIENT_ID,
+                    CLAUDE_AUTHORIZE_URI, CLAUDE_TOKEN_URI, CLAUDE_SCOPES, CLAUDE_REDIRECT_URI, CLAUDE_ENV_VAR);
             Provider codex = new Provider("codex", "Codex", false, null, null, null, null, null, null);
             this.providers = Map.of(claude.id(), claude, codex.id(), codex);
         }
@@ -237,19 +237,6 @@ public class Agents {
 
         public List<Provider> all() {
             return List.copyOf(providers.values());
-        }
-
-        private static String blankToNull(String value) {
-            String stripped = value == null ? "" : value.strip();
-            return stripped.isEmpty() ? null : stripped;
-        }
-
-        private static void validUrl(String value, String name) {
-            try {
-                URI.create(value).toURL();
-            } catch (MalformedURLException | IllegalArgumentException exception) {
-                throw new IllegalStateException(name + " is not a valid URL: " + value, exception);
-            }
         }
     }
 
@@ -393,18 +380,17 @@ public class Agents {
     /**
      * The only place this application talks to an agent provider's OAuth2 token endpoint.
      *
-     * <p>PKCE only, no client secret: the operator supplies just a client id, and the code
-     * challenge is what protects the exchange. Every provider that reaches this class is assumed to
-     * speak the same authorization-code-plus-PKCE grant; a provider that cannot would need its own
-     * client, not a branch in this one.
+     * <p>PKCE only, no client secret: the code challenge is what protects the exchange. It speaks the
+     * grant exactly as Claude Code does — JSON bodies, the {@code state} echoed on the code exchange and
+     * the scopes repeated on renewal; a provider that speaks another dialect would need its own client,
+     * not a branch in this one.
      */
     @Component
     public static class OAuthClient {
 
         private static final String ACCEPT_HEADER = "Accept";
         private static final String JSON = "application/json";
-        private static final String FORM = "application/x-www-form-urlencoded";
-        private static final int MAX_SCOPE_LENGTH = 512;
+            private static final int MAX_SCOPE_LENGTH = 512;
         private static final int MAX_ACCOUNT_LABEL_LENGTH = 255;
         private static final int MAX_ERROR_LENGTH = 256;
 
@@ -421,7 +407,7 @@ public class Agents {
 
         public String authorizeUrl(Provider provider, String state, String codeChallenge) {
             return provider.authorizeUri()
-                    + "?response_type=code"
+                    + (provider.authorizeUri().contains("?") ? "&" : "?") + "response_type=code"
                     + "&client_id=" + encode(provider.clientId())
                     + "&redirect_uri=" + encode(provider.redirectUri())
                     + "&scope=" + encode(provider.scopes() == null ? "" : provider.scopes())
@@ -431,8 +417,8 @@ public class Agents {
         }
 
         /**
-         * A provider grant. {@code accountLabel} reads an optional {@code account}/{@code email}
-         * field when the provider's token response carries one, else {@code null}: shown to the
+         * A provider grant. {@code accountLabel} reads the account e-mail when the provider's token
+         * response carries one ({@code account.email_address} for Claude), else {@code null}: shown to the
          * player so they can tell two linked accounts of the same provider apart, never relied on
          * for anything else.
          */
@@ -440,35 +426,41 @@ public class Agents {
                              String scope, String accountLabel) {
         }
 
-        public Tokens exchangeCode(Provider provider, String code, String codeVerifier) {
-            return readTokens(postForm(provider.tokenUri(), Map.of(
+        public Tokens exchangeCode(Provider provider, String code, String state, String codeVerifier) {
+            return readTokens(post(provider.tokenUri(), Map.of(
                     "grant_type", "authorization_code",
                     "client_id", provider.clientId(),
                     "code", code,
+                    "state", state,
                     "redirect_uri", provider.redirectUri(),
                     "code_verifier", codeVerifier)));
         }
 
         /** Some providers rotate the refresh token on renewal, some do not; a missing one keeps the old. */
         public Tokens refresh(Provider provider, String refreshToken) {
-            return readTokens(postForm(provider.tokenUri(), Map.of(
+            return readTokens(post(provider.tokenUri(), Map.of(
                     "grant_type", "refresh_token",
                     "client_id", provider.clientId(),
-                    "refresh_token", refreshToken)));
+                    "refresh_token", refreshToken,
+                    "scope", provider.scopes() == null ? "" : provider.scopes())));
         }
 
-        private String postForm(String tokenUri, Map<String, String> form) {
-            String body = form.entrySet().stream()
-                    .map(entry -> encode(entry.getKey()) + "=" + encode(entry.getValue()))
-                    .collect(Collectors.joining("&"));
+        /**
+         * A 4xx other than 429 is the provider refusing the grant (a spent code, a revoked refresh
+         * token), so it is read as a refusal, not as an outage: retrying would not help, re-authorizing does.
+         */
+        private String post(String tokenUri, Map<String, String> fields) {
             HttpRequest request = HttpRequest.newBuilder(URI.create(tokenUri))
                     .timeout(requestTimeout)
-                    .header(HttpHeaders.CONTENT_TYPE, FORM)
+                    .header(HttpHeaders.CONTENT_TYPE, JSON)
                     .header(ACCEPT_HEADER, JSON)
-                    .POST(HttpRequest.BodyPublishers.ofString(body))
+                    .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(fields)))
                     .build();
             try {
                 HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+                if (response.statusCode() / 100 == 4 && response.statusCode() != 429) {
+                    throw AgentsException.rejected("the token endpoint answered " + response.statusCode());
+                }
                 if (response.statusCode() / 100 != 2) {
                     throw AgentsException.unavailable("the token endpoint answered " + response.statusCode());
                 }
@@ -493,7 +485,10 @@ public class Agents {
             if (accessToken == null) {
                 throw AgentsException.unavailable("the token endpoint returned no access token");
             }
-            String accountLabel = text(node, "account", MAX_ACCOUNT_LABEL_LENGTH);
+            JsonNode account = node.get("account");
+            String accountLabel = account != null && account.isObject()
+                    ? text(account, "email_address", MAX_ACCOUNT_LABEL_LENGTH)
+                    : text(node, "account", MAX_ACCOUNT_LABEL_LENGTH);
             if (accountLabel == null) {
                 accountLabel = text(node, "email", MAX_ACCOUNT_LABEL_LENGTH);
             }

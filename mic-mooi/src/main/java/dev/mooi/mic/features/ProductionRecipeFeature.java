@@ -70,11 +70,11 @@ public class ProductionRecipeFeature {
         return service.draft(projectId, principal.player().id(), body);
     }
 
-    @PostMapping("/me/projects/{projectId}/production/recipe/publish")
-    @Auth.Authenticated
-    @Auth.ServiceCall
-    public RecipePayload publish(@PathVariable UUID projectId, Auth.Principal principal) {
-        return service.publish(projectId, principal.player().id());
+    /** Service-only: a draft is published once a run proves it, which may outlive the player's access token. */
+    @PostMapping("/internal/projects/{projectId}/production/recipe/publish")
+    @Auth.ServiceOnly
+    public RecipePayload publish(@PathVariable UUID projectId) {
+        return service.publish(projectId);
     }
 
     @DeleteMapping("/me/projects/{projectId}/production/recipe")
@@ -160,8 +160,7 @@ public class ProductionRecipeFeature {
         }
 
         @Transactional
-        public RecipePayload publish(UUID projectId, UUID playerId) {
-            requireProject(projectId, playerId);
+        public RecipePayload publish(UUID projectId) {
             Recipe row = recipes.findById(projectId).orElseThrow(() ->
                     new ResponseStatusException(HttpStatus.CONFLICT, "No deployment configuration exists"));
             if (row.getDraftScript() == null) {

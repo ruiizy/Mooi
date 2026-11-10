@@ -5,8 +5,7 @@ resolves and downloads the model through the runtime's pinned index before start
 so the first download never races the service health check.
 
 The service then starts the engine once at boot, bound to a free loopback port, keeps the model
-resident for every dictation and stops it on shutdown (SIGTERM, then SIGKILL after 5 s). The
-engine is stopped with the service on shutdown.
+resident for every dictation and stops it on shutdown (SIGTERM, then SIGKILL after 5 s).
 """
 
 from __future__ import annotations

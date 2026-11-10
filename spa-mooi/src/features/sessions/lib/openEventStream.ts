@@ -25,7 +25,7 @@ const MAX_BACKOFF_MS = 15000;
 
 /**
  * A frame's `data:` line carries `seq` and `at` flattened alongside the event-specific fields
- * (`sse_frame` in `mic-sessions/shared/events.py`), so it is unpacked rather than nested under
+ * (`new_event` in `mic-sessions/shared/events.py`), so it is unpacked rather than nested under
  * a `data` key on the wire.
  */
 const parseFrame = (frame: string): StreamFrame | null => {

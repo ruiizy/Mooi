@@ -1,0 +1,68 @@
+{
+ "id": "7878f4ce-e7df-4beb-be9c-487c5da4f8d7",
+ "kind": "session",
+ "projectId": "23226de4-184e-4aef-8f1d-eb713d9fae52",
+ "projectFullName": "Mydherin/Leffi",
+ "provider": "claude",
+ "connectionId": "564d22de-e113-4206-a483-74163144494a",
+ "providerLabel": "Claude",
+ "adapter": "sdk",
+ "adapterLabel": "Claude SDK",
+ "branch": "bench/c2",
+ "baseBranch": "main",
+ "status": "ready",
+ "detail": null,
+ "createdAt": "2026-11-09T20:26:29.106509Z",
+ "updatedAt": "2026-11-09T20:29:24.458143Z",
+ "lastSeq": 269,
+ "usage": {
+  "context": {
+   "percent": 15.6527,
+   "usedTokens": 156527,
+   "limitTokens": 1000000,
+   "updatedAt": 1794256164.4348907
+  },
+  "quota": {
+   "seven_day": {
+    "percent": 84.0,
+    "window": "seven_day",
+    "resetsAt": 1794315600,
+    "status": "allowed_warning",
+    "updatedAt": 1794256164.4194462
+   },
+   "five_hour": {
+    "percent": 39.0,
+    "window": "five_hour",
+    "resetsAt": 1794270600,
+    "updatedAt": 1794256164.4194462
+   }
+  }
+ },
+ "pending": null,
+ "capabilities": {
+  "streaming": true,
+  "thinking": true,
+  "permissions": false,
+  "questions": true,
+  "interrupt": true,
+  "editableToolInput": false,
+  "cost": true,
+  "images": true
+ },
+ "model": "sonnet",
+ "effort": "high",
+ "deployment": {
+  "state": "stopped",
+  "operationId": null,
+  "phase": null,
+  "previewUrl": null,
+  "result": null,
+  "cleanupRequired": false,
+  "updatedAt": "2026-11-09T20:26:29.106509Z"
+ },
+ "deploymentSetup": null,
+ "deploymentConfigured": false,
+ "workspacePath": "/home/mooi/workspaces/sessions/7878f4ce-e7df-4beb-be9c-487c5da4f8d7/repository",
+ "baseCommit": "a32151f3a4ddb167da7c8e5f5fb50d437f698250",
+ "recoverable": false
+}

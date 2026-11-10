@@ -64,11 +64,12 @@ class Settings(BaseSettings):
     # Sessions
     max_sessions: int = Field(default=8, gt=0)
     max_sessions_per_player: int = Field(default=4, gt=0)
-    session_idle_timeout_minutes: int = Field(default=180, gt=0)
-    session_activity_interval_seconds: int = Field(default=60, gt=0)
     event_log_limit: int = Field(default=5000, gt=0)
     event_log_bytes: int = Field(default=8 * 1024 * 1024, gt=0)
     sse_heartbeat_seconds: int = Field(default=15, gt=0)
+    # Agent traces: spans kept per conversation, and characters kept of each span's input and output.
+    trace_max_spans: int = Field(default=5000, gt=0)
+    trace_detail_chars: int = Field(default=8000, ge=256)
     changes_debounce_seconds: float = Field(default=1.5, ge=0)
     # Dependency and cache directories hidden from Changes even when no .gitignore lists them.
     changes_excluded_directories: Annotated[list[str], NoDecode] = Field(default_factory=lambda: [
@@ -78,6 +79,8 @@ class Settings(BaseSettings):
     ])
     # Largest file shown as a text diff, and largest diff text returned (cut at a line boundary).
     changes_preview_max_bytes: int = Field(default=4 * 1024 * 1024, ge=64 * 1024)
+    # Most files the Files tab lists for one workspace.
+    files_max_listed: int = Field(default=50_000, ge=1_000)
 
     # Session deployments. Docker talks to the host engine, not a nested daemon.
     docker_binary: str = Field(default="docker", min_length=1)
@@ -111,6 +114,10 @@ class Settings(BaseSettings):
     agent_claude_disallowed_tools: Annotated[list[str], NoDecode] = []
     # Largest single CLI message (a tool result carrying screenshots or a big file read is one line).
     agent_claude_max_message_bytes: int = Field(default=64 * 1024 * 1024, ge=1024 * 1024)
+    # Run the agent's shell commands through RTK (when installed) to compress their output.
+    agent_claude_rtk: bool = True
+    # Claude Code CLI the `cli` adapter launches (a name on PATH or a path); the image pins its version.
+    agent_claude_cli: str = "claude"
     # Reconnections tried, with backoff, when a provider stream breaks before the session fails.
     agent_recovery_attempts: int = Field(default=3, ge=0, le=10)
 

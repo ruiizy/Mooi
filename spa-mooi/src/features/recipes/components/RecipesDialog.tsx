@@ -90,7 +90,7 @@ export const RecipesDialog = ({ onClose, initialMarketplaceId, onApply, applyDis
                 <span className="text-xs font-semibold text-ink-muted">Additional instructions <span className="font-normal text-ink-subtle">(optional)</span></span>
                 <textarea value={notes} onChange={(event) => setNotes(event.target.value)} rows={2} maxLength={4000}
                   placeholder="e.g. Only the backend part, keep the current login screen"
-                  className="resize-none rounded-[10px] border border-line bg-surface-2 px-3 py-2 text-sm text-ink outline-none transition placeholder:text-ink-subtle focus:border-brand" />
+                  className="resize-none rounded-control border border-line bg-surface-2 px-3 py-2 text-sm text-ink outline-none transition placeholder:text-ink-subtle focus:border-brand" />
               </label>
             ) : null}
           </section>

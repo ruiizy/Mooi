@@ -7,7 +7,7 @@ interface EyebrowProps {
 }
 
 export const Eyebrow = ({ children, className }: EyebrowProps) => (
-  <p className={cn('text-[11px] font-extrabold tracking-[0.09em] text-ink-subtle uppercase', className)}>
+  <p className={cn('font-mono text-[10.5px] font-medium tracking-[0.12em] text-ink-subtle uppercase', className)}>
     {children}
   </p>
 );

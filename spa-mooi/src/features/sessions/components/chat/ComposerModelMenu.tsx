@@ -66,7 +66,7 @@ export const ComposerModelMenu = ({ model, effort, modelOptions, effortOptions, 
       </button>
       {open ? (
         <div role="dialog" aria-label="Model and effort"
-          className="absolute inset-x-1.5 bottom-full z-50 mb-2 flex max-h-[min(20rem,50dvh)] flex-col gap-3 overflow-y-auto rounded-xl border border-line-strong bg-surface p-3 shadow-[0_12px_32px_rgb(0_0_0/0.2)] dark:shadow-[0_12px_32px_rgb(0_0_0/0.6)]">
+          className="absolute inset-x-1.5 bottom-full z-50 mb-2 flex max-h-[min(20rem,50dvh)] flex-col gap-3 overflow-y-auto rounded-xl border border-line-strong bg-surface p-3 shadow-pop">
           <Field label="Model" value={model} options={modelOptions} onChange={onModelChange} disabled={disabled} />
           {effortOptions.length > 0 ? (
             <Field label="Effort" value={effort ?? ''} options={effortOptions.map((option) => ({ value: option, label: option }))}

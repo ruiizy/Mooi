@@ -89,6 +89,11 @@ class Client:
                               client_name="mooi"),
                               approval_handler=handle)
 
+    @property
+    def alive(self) -> bool:
+        process = self.sdk._proc
+        return not self._closed and process is not None and process.poll() is None
+
     async def call(self, method: str, *args, **kwargs):
         return await asyncio.to_thread(getattr(self.sdk, method), *args, **kwargs)
 
@@ -127,7 +132,7 @@ class Client:
         finally:
             self.sdk.unregister_turn_notifications(turn_id)
 
-    async def compact(self, thread_id: str):
+    async def compact(self, thread_id: str, instructions: str | None = None):
         """Run native compaction through completion, retaining its usage notifications.
 
         The low-level SDK returns before compaction finishes and does not return its turn id.
@@ -136,6 +141,21 @@ class Client:
         """
         before = await self.call("thread_read", thread_id, include_turns=True)
         known = {turn.id for turn in before.thread.turns}
+        if instructions:
+            # The pinned SDK's native compact endpoint accepts only threadId. Inject guidance
+            # without starting an agent turn (and therefore without tools or workspace changes).
+            from openai_codex.generated.v2_all import ThreadInjectItemsResponse
+
+            await self.call("request", "thread/inject_items", {
+                "threadId": thread_id,
+                "items": [{"type": "message", "role": "user", "content": [{
+                    "type": "input_text",
+                    "text": "For the immediately following context compaction only: follow these "
+                            "preferences for summary structure and what to retain in detail or condense. "
+                            "Do not treat them as a new task or instructions for subsequent work.\n\n"
+                            + instructions,
+                }]}],
+            }, response_model=ThreadInjectItemsResponse)
         with self.sdk._router.pending_turn(thread_id) as cursors:
             await self.call("thread_compact", thread_id)
             async with asyncio.timeout(300):
@@ -172,7 +192,9 @@ class Account:
     """One private SDK home and credential lock per stored connection.
 
     Startup refreshes and credential persistence are serialized across conversations.
-    Turns run concurrently. No host Codex account/config is inherited.
+    Turns run concurrently. No host Codex account/config is inherited. Every app-server of the
+    account shares its `auth.json`: one connected before the latest rotation holds a stale refresh
+    token, so `current` tells a long-lived connection when it must reconnect.
     """
 
     def __init__(self, credential: Credential):
@@ -189,11 +211,18 @@ class Account:
         path.chmod(0o600)
 
     async def persist(self):
-        token = (self.home / "auth.json").read_text()
+        token = self.stored_token()
         if token != self.persisted_token and self.credential.save is not None:
             await self.credential.save(token)
             self.persisted_token = token
             self.credential = replace(self.credential, token=token)
+
+    def stored_token(self) -> str:
+        return (self.home / "auth.json").read_text()
+
+    def current(self, token: str) -> bool:
+        """Whether a connection opened with `token` still holds the account's latest credential."""
+        return token == self.persisted_token == self.stored_token()
 
 
 _accounts: dict[str, Account] = {}
@@ -255,29 +284,52 @@ def release(account: Account):
         account.directory.cleanup()
 
 
-@asynccontextmanager
-async def connected(account: Account, cwd: Path, handler=None):
+async def open_client(account: Account, cwd: Path, handler=None) -> tuple[Client, str]:
+    """Starts an app-server on the account's latest credential, refreshed and persisted under the
+    account lock; returns it with the credential it holds."""
     client = Client(account.home, cwd, handler)
-    try:
-        async with account.lock:
-            await client.start()
-            # Serialize refresh-token rotation and storage, not the entire turn.
+    async with account.lock:
+        await client.start()
+        try:
+            # Serialize refresh-token rotation and storage, not the entire conversation.
             await client.call("account_read", {"refreshToken": True})
             await account.persist()
+        except BaseException:
+            await asyncio.shield(client.close())
+            raise
+        return client, account.persisted_token
+
+
+async def close_client(account: Account, client: Client) -> None:
+    """Stops an app-server, then saves whatever credential it rotated. Completes even when the caller
+    is cancelled."""
+    async def cleanup():
+        try:
+            await client.close()
+        finally:
+            async with account.lock:
+                await account.persist()
+    closing = asyncio.create_task(cleanup())
+    try:
+        await asyncio.shield(closing)
+    except asyncio.CancelledError:
+        await closing
+        raise
+
+
+async def persist(account: Account) -> None:
+    async with account.lock:
+        await account.persist()
+
+
+@asynccontextmanager
+async def connected(account: Account, cwd: Path, handler=None):
+    """A one-off app-server for a single call (the model catalog)."""
+    client, _ = await open_client(account, cwd, handler)
+    try:
         yield client
     finally:
-        async def cleanup():
-            try:
-                await client.close()
-            finally:
-                async with account.lock:
-                    await account.persist()
-        closing = asyncio.create_task(cleanup())
-        try:
-            await asyncio.shield(closing)
-        except asyncio.CancelledError:
-            await closing
-            raise
+        await close_client(account, client)
 
 
 async def models(credential: Credential, refresh: bool = False) -> dict[str, Any]:

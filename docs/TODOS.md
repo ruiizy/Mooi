@@ -1,13 +1,25 @@
 # TODOs
 
-- [X] Support Codex as Agent Engine
-- [ ] Support send images/audio
-- [ ] Support generate images/audio/videos
-- [X] Support agentic merge
-- [X] Support production deployment
-- [ ] Support General chat with AG-UI
-- [*] Support STT in the chat
-- [*] Embed in capacitor
-- [X] Support dynamic backups system
-- [*] Support Recipes
-- [ ] Adjust model adjustment, only makes sense the default, since in deploy and all those stuff must be the chat model selected by the user
+- [ ] Langfuse view over session, to debug
+- [ ] Microphone expiration
+- [ ] So times when I make production deployment it says fetching but it do not show more logs until I reload
+- [ ] Apply dnd in todos list with better pattern, about grabbing 1.5 secs in any place to enable in the row
+- [ ] The user admin dialog sucks in mobile since dialog allow scrolling with no sense and actions buttons are together
+- [ ] In changes show file name with extension just and as subtitle the full relative path and if you hover it you could see a tooltip with full path if you could not see entrierly as subtitle cause ellipsis
+- [ ] Files view, allowing editing files with plain text manually
+- [ ] When you ask the chat for something and chat makes a deterministic deployment in dev session, the deployment set up message appears, and it should not appers cause that message is always when you are setting up the deployment with the agent from fisrt time (triggered from chat or from button)
+- [ ] Adjust at ui ux level properly the session context and 5 hour limit
+- [ ] Say how diff commits from main to previous release
+- [ ] Upgrade playwright
+- [ ] Shared deployments between some users
+- [x] Do not close session with proper refresh token after 30 days without connection
+- [x] Remove the legacy body refresh token transport (AUTH_LEGACY_BODY_TOKEN_ENABLED, LegacyRefreshRequest, legacyRefreshToken.ts) at least 30 days after the persistent-sessions release
+- [x] Adjust ui/ux pattern with proper number in status in todos view
+- [x] Add additional comment to recipes
+- [x] Proper admin menu seeing current active users, current sessions accross all users
+- [x] Get stt recipe from this project
+- [x] Full TODOS view
+- [x] Allow with drag and drop move todo items
+- [x] Do not remove session automatically, just remove it when user click in close session
+- [x] Microphone sometimes when you have used from first time and you enable again take so much time to work
+- [x] I got an env and platform api token access in mooi platform in prod deployment

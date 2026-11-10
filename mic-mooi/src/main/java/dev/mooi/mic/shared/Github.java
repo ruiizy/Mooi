@@ -25,6 +25,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -146,6 +147,29 @@ public class Github {
                     "GitHub could not create this repository. Check its name and try again");
         }
 
+        /** The file moved on since the caller read it: committing now would silently drop someone's change. */
+        public static GithubException fileChanged() {
+            return new GithubException(HttpStatus.CONFLICT,
+                    "This file changed on GitHub since it was loaded. Reload it and try again");
+        }
+
+        /** The grant reads the repository but may not commit to its default branch (permissions or branch protection). */
+        public static GithubException contentsWriteDenied() {
+            return new GithubException(HttpStatus.FORBIDDEN,
+                    "GitHub denied the commit. Check that Mooi may write to this repository and its default branch");
+        }
+
+        /**
+         * GitHub does not recognise this instance's app credentials, so no authorization could ever
+         * complete. Said before the player is sent away, rather than after GitHub shows them a 404.
+         */
+        public static GithubException notConfigured() {
+            LOG.warn("GitHub rejected the configured client credentials: set a real GitHub App client id and "
+                    + "secret, or link the account another way (MOOI_DEVELOPMENT_GITHUB_TOKEN on local stacks)");
+            return new GithubException(HttpStatus.SERVICE_UNAVAILABLE,
+                    "GitHub linking is not set up on this Mooi instance yet");
+        }
+
         /** GitHub is unreachable, slow or broken. Distinct from a refusal: retrying may work. */
         public static GithubException unavailable(String detail) {
             LOG.warn("GitHub is unavailable: {}", detail);
@@ -187,6 +211,10 @@ public class Github {
             this.clientId = require(clientId, "GITHUB_CLIENT_ID");
             this.clientSecret = require(clientSecret, "GITHUB_CLIENT_SECRET");
             this.appSlug = appSlug == null ? "" : appSlug.strip();
+            if (this.appSlug.isEmpty()) {
+                LOG.warn("GITHUB_APP_SLUG is not set: players cannot install the GitHub App, so only its owner "
+                        + "can grant Mooi access to repositories");
+            }
             this.redirectUri = validUrl(require(redirectUri, "GITHUB_REDIRECT_URI"), "GITHUB_REDIRECT_URI");
             this.authorizeUri = validUrl(authorizeUri, "GITHUB_AUTHORIZE_URI");
             this.tokenUri = validUrl(tokenUri, "GITHUB_TOKEN_URI");
@@ -367,6 +395,13 @@ public class Github {
     }
 
     /**
+     * One file's text on the default branch together with its blob {@code sha}: the revision a later
+     * {@link OAuthClient#writeFile} must name, so a commit can never overwrite a change it did not see.
+     */
+    public record FileContent(String sha, String text) {
+    }
+
+    /**
      * The only place this application talks to GitHub.
      *
      * <p>Two habits of GitHub's OAuth endpoint drive the shape of this class. It answers failures
@@ -385,6 +420,9 @@ public class Github {
         private static final String FORM = "application/x-www-form-urlencoded";
         private static final String API_VERSION_HEADER = "X-GitHub-Api-Version";
         private static final String API_VERSION = "2022-11-28";
+        private static final String TOKEN_ENDPOINT = "the GitHub token endpoint";
+        private static final String CREDENTIALS_PROBE_CODE = "mooi-credentials-probe";
+        private static final String INCORRECT_CLIENT_CREDENTIALS = "incorrect_client_credentials";
         private static final int MAX_LOGIN_LENGTH = 128;
         private static final int MAX_NAME_LENGTH = 255;
         private static final int MAX_URL_LENGTH = 512;
@@ -400,6 +438,7 @@ public class Github {
         private final Clock clock;
         private final HttpClient httpClient;
         private final ObjectMapper objectMapper = JsonMapper.shared();
+        private volatile boolean credentialsAccepted;
 
         OAuthClient(Settings settings, Clock clock) {
             this.settings = settings;
@@ -443,6 +482,35 @@ public class Github {
             }
             return "https://github.com/apps/" + encode(settings.getAppSlug())
                     + "/installations/new?state=" + encode(state);
+        }
+
+        /**
+         * Proves GitHub knows the configured app before anyone is sent to it.
+         *
+         * <p>A code that can never be valid is redeemed on purpose. GitHub answers an unknown client
+         * id with a 404 and a wrong secret with {@code incorrect_client_credentials}, while a known
+         * app gets {@code bad_verification_code}, so the probe tells them apart without a grant. The
+         * credentials are fixed for the life of the process, so one success is remembered; a failure
+         * is not, so the next click checks again.
+         */
+        public void ensureCredentialsAccepted() {
+            if (credentialsAccepted) {
+                return;
+            }
+            HttpResponse<String> response = exchange(formRequest(Map.of(
+                    "client_id", settings.getClientId(),
+                    "client_secret", settings.getClientSecret(),
+                    "code", CREDENTIALS_PROBE_CODE)), TOKEN_ENDPOINT);
+            if (response.statusCode() == HttpStatus.NOT_FOUND.value()) {
+                throw GithubException.notConfigured();
+            }
+            if (response.statusCode() / 100 != 2) {
+                throw GithubException.unavailable(TOKEN_ENDPOINT + " answered " + response.statusCode());
+            }
+            if (INCORRECT_CLIENT_CREDENTIALS.equals(text(readJson(response.body()), "error", MAX_ERROR_LENGTH))) {
+                throw GithubException.notConfigured();
+            }
+            credentialsAccepted = true;
         }
 
         public Tokens exchangeCode(String code) {
@@ -619,6 +687,78 @@ public class Github {
                     "GET /repos/" + owner + "/" + name + "/contents/" + path, GITHUB_RAW);
         }
 
+        /**
+         * One file on the default branch with its revision, or empty when no file lives at that path.
+         *
+         * <p>Unlike {@link #readFile}, a 404 is an answer here rather than a failure: a file that does
+         * not exist yet is a normal state for a caller that may create it.
+         */
+        public Optional<FileContent> readFileContent(String owner, String name, String path, String accessToken) {
+            String description = "GET /repos/" + owner + "/" + name + "/contents/" + path;
+            HttpResponse<String> response = exchange(repositoryRequest(contentsPath(owner, name, path), accessToken)
+                    .GET().build(), description);
+            int status = response.statusCode();
+            if (status == 404) {
+                return Optional.empty();
+            }
+            if (status == 401 || status == 403) {
+                LOG.warn("GitHub refused {} with {}", description, status);
+                throw GithubException.reauthorize();
+            }
+            if (status / 100 != 2) {
+                throw GithubException.unavailable(description + " answered " + status);
+            }
+            JsonNode body = readJson(response.body());
+            String sha = text(body, "sha");
+            if (!"file".equals(text(body, "type")) || sha == null) {
+                throw GithubException.unavailable(description + " is not a file");
+            }
+            // Past 1 MB the JSON form carries no content; the raw form still does.
+            String text = "base64".equals(text(body, "encoding"))
+                    ? new String(Base64.getMimeDecoder().decode(body.path("content").asText("")), StandardCharsets.UTF_8)
+                    : readFile(owner, name, path, accessToken);
+            return Optional.of(new FileContent(sha, text));
+        }
+
+        /**
+         * Commits one file to the default branch as the player and answers its new revision.
+         *
+         * <p>{@code sha} is the revision the caller read, or null to create the file. GitHub refuses
+         * either when the file moved on meanwhile (409 for a stale revision, 422 for a creation that
+         * meets an existing file), and both mean the same thing to the caller: reload first.
+         */
+        public String writeFile(String owner, String name, String path, String text, String sha, String message,
+                                String accessToken) {
+            Map<String, String> payload = new LinkedHashMap<>();
+            payload.put("message", message);
+            payload.put("content", Base64.getEncoder().encodeToString(text.getBytes(StandardCharsets.UTF_8)));
+            if (sha != null) {
+                payload.put("sha", sha);
+            }
+            String body;
+            try {
+                body = objectMapper.writeValueAsString(payload);
+            } catch (JacksonException exception) {
+                throw GithubException.unavailable("Unable to build the commit request");
+            }
+            String description = "PUT /repos/" + owner + "/" + name + "/contents/" + path;
+            HttpResponse<String> response = exchange(repositoryRequest(contentsPath(owner, name, path), accessToken)
+                    .header(HttpHeaders.CONTENT_TYPE, JSON)
+                    .PUT(HttpRequest.BodyPublishers.ofString(body)).build(), description);
+            String revision = switch (response.statusCode()) {
+                case 200, 201 -> text(readJson(response.body()).path("content"), "sha");
+                case 401 -> throw GithubException.reauthorize();
+                case 403 -> throw GithubException.contentsWriteDenied();
+                case 404 -> throw GithubException.repositoryNotFound();
+                case 409, 422 -> throw GithubException.fileChanged();
+                default -> throw GithubException.unavailable(description + " answered " + response.statusCode());
+            };
+            if (revision == null) {
+                throw GithubException.unavailable(description + " returned no revision");
+            }
+            return revision;
+        }
+
         /** Every path segment encoded on its own, so the separators survive and nothing else can break out. */
         private static String contentsPath(String owner, String name, String path) {
             String encodedPath = Arrays.stream(path.split("/"))
@@ -732,16 +872,19 @@ public class Github {
         }
 
         private String postForm(Map<String, String> form) {
+            return send(formRequest(form), TOKEN_ENDPOINT);
+        }
+
+        private HttpRequest formRequest(Map<String, String> form) {
             String body = form.entrySet().stream()
                     .map(entry -> encode(entry.getKey()) + "=" + encode(entry.getValue()))
                     .collect(Collectors.joining("&"));
-            HttpRequest request = HttpRequest.newBuilder(URI.create(settings.getTokenUri()))
+            return HttpRequest.newBuilder(URI.create(settings.getTokenUri()))
                     .timeout(settings.getRequestTimeout())
                     .header(HttpHeaders.CONTENT_TYPE, FORM)
                     .header(ACCEPT_HEADER, JSON)
                     .POST(HttpRequest.BodyPublishers.ofString(body))
                     .build();
-            return send(request, "the GitHub token endpoint");
         }
 
         /**
@@ -784,12 +927,17 @@ public class Github {
         }
 
         private String send(HttpRequest request, String description) {
+            HttpResponse<String> response = exchange(request, description);
+            if (response.statusCode() / 100 != 2) {
+                throw GithubException.unavailable(description + " answered " + response.statusCode());
+            }
+            return response.body();
+        }
+
+        /** The raw round trip, for the rare caller that reads a status code as an answer rather than a failure. */
+        private HttpResponse<String> exchange(HttpRequest request, String description) {
             try {
-                HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-                if (response.statusCode() / 100 != 2) {
-                    throw GithubException.unavailable(description + " answered " + response.statusCode());
-                }
-                return response.body();
+                return httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             } catch (IOException exception) {
                 throw GithubException.unavailable(description + " failed: " + exception.getMessage());
             } catch (InterruptedException exception) {

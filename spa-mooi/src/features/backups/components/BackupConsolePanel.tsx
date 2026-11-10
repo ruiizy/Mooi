@@ -35,7 +35,7 @@ export const BackupConsolePanel = ({ snapshot, logs, hasChat, canBackup, onOpenC
 
   if (!snapshot?.operationId || snapshot.state === 'idle') {
     return <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
-      <span className="flex size-11 items-center justify-center rounded-[10px] bg-surface-2 text-ink-subtle"><Terminal className="size-5" /></span>
+      <span className="flex size-11 items-center justify-center rounded-control bg-surface-2 text-ink-subtle"><Terminal className="size-5" /></span>
       <p className="text-sm font-bold text-ink">No backup output yet</p>
       <p className="max-w-sm text-sm text-ink-muted">Start a backup or a restore to follow its script live. Past output stays in each backup's detail.</p>
     </div>;

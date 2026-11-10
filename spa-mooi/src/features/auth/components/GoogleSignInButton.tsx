@@ -19,7 +19,7 @@ export const GoogleSignInButton = ({
     <div className="relative inline-flex w-full">
       <span
         aria-hidden
-        className={buttonStyles('primary', 'lg', 'w-full')}
+        className={buttonStyles('brand', 'lg', 'w-full')}
         data-loading={busy || !isReady}
       >
         {busy ? <LoaderCircle className="size-4 animate-spin" /> : <LogIn className="size-4" />}

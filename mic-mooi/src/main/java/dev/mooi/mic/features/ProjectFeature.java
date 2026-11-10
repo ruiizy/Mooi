@@ -16,6 +16,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
@@ -50,7 +51,9 @@ import lombok.Setter;
  * <p>The one column that is not GitHub's is {@code webApplication}: the player's own answer to
  * whether the repository is a web application. Nothing can infer it reliably from metadata, so it is
  * asked when the project is added, can be corrected later, and decides whether the project's
- * sessions offer deploy and preview at all.
+ * sessions offer deploy and preview at all. {@code developmentDeploymentReady} is the platform's own:
+ * set once the agent's development deployment setup passed its test, after which the project's
+ * sessions deploy their root Compose file directly instead of going through that setup again.
  *
  * <p>That grant is also the authorization rule. Imported repository metadata is fetched from GitHub
  * with the caller's token; newly created repository metadata comes from GitHub's creation response.
@@ -93,6 +96,14 @@ public class ProjectFeature {
                                         @Valid @RequestBody UpdateProjectRequest request,
                                         Auth.Principal principal) {
         return projectService.update(principal.player().id(), projectId, request.webApplication());
+    }
+
+    /** Service-only: the setup's test may finish after the player's access token expired. Idempotent. */
+    @PutMapping("/internal/projects/{projectId}/development/deployment/ready")
+    @Auth.ServiceOnly
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void markDevelopmentDeploymentReady(@PathVariable UUID projectId) {
+        projectService.markDevelopmentDeploymentReady(projectId);
     }
 
     /** Removes the local project reference only. */
@@ -200,6 +211,17 @@ public class ProjectFeature {
             return toPayload(project);
         }
 
+        /** Keeps the first time only: later setups change the deployment, never whether it was set up. */
+        @Transactional
+        public void markDevelopmentDeploymentReady(UUID projectId) {
+            Project project = projectRepository.findById(projectId)
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Project not found"));
+            if (project.getDevelopmentDeploymentReadyAt() == null) {
+                project.setDevelopmentDeploymentReadyAt(OffsetDateTime.now(clock));
+                Github.LOG.info("Repository {} completed its development deployment setup", project.getFullName());
+            }
+        }
+
         /** Refuses to delete a repository if its saved name now resolves to another GitHub id. */
         @Transactional
         public void delete(UUID playerId, UUID projectId) {
@@ -246,7 +268,7 @@ public class ProjectFeature {
                     project.getName(), project.getFullName(), project.getDescription(),
                     project.isPrivateRepository(), project.getDefaultBranch(), project.getHtmlUrl(),
                     project.getLanguage(), project.getStars(), project.isWebApplication(),
-                    project.getAddedAt());
+                    project.getDevelopmentDeploymentReadyAt() != null, project.getAddedAt());
         }
     }
 
@@ -309,6 +331,10 @@ public class ProjectFeature {
         /** The player's answer, not GitHub's: gates deploy and preview for this project's sessions. */
         @Column(name = "is_web_application", nullable = false)
         private boolean webApplication;
+
+        /** Platform-owned: when a development deployment setup first passed its test; NULL before. */
+        @Column(name = "development_deployment_ready_at")
+        private OffsetDateTime developmentDeploymentReadyAt;
 
         /** When the player added it here — unrelated to when the repository was created on GitHub. */
         @Column(name = "added_at", nullable = false, updatable = false)
@@ -394,7 +420,7 @@ public class ProjectFeature {
     public record ProjectPayload(UUID id, long githubRepoId, String owner, String name, String fullName,
                                  String description, boolean isPrivate, String defaultBranch,
                                  String htmlUrl, String language, int stars, boolean webApplication,
-                                 OffsetDateTime addedAt) {
+                                 boolean developmentDeploymentReady, OffsetDateTime addedAt) {
     }
 
     public record ProjectsResponse(List<ProjectPayload> projects) {

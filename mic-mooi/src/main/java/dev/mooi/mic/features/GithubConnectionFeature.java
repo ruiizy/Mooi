@@ -135,6 +135,7 @@ public class GithubConnectionFeature {
          * party that will later verify it.
          */
         public AuthorizationPayload startAuthorization(UUID playerId) {
+            oauthClient.ensureCredentialsAccepted();
             String state = stateCodec.issue(playerId);
             return new AuthorizationPayload(oauthClient.authorizeUrl(state), oauthClient.installUrl(state));
         }

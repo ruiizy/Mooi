@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import hashlib
 import logging
 import os
 import re
@@ -119,6 +120,21 @@ class FileDiff:
     # "text", or "binary" / "too_large" when there is no diff to read.
     preview: str
     truncated: bool = False
+
+
+@dataclass(frozen=True)
+class FileListing:
+    paths: list[str]
+    truncated: bool = False
+
+
+@dataclass(frozen=True)
+class FileContent:
+    # "text", or "binary" / "too_large" when there is nothing editable to show.
+    preview: str
+    content: str = ""
+    revision: str = ""
+    size: int = 0
 
 
 _BINARY_DIFF = re.compile(r"^Binary files .* differ$", re.MULTILINE)
@@ -612,6 +628,89 @@ class Workspaces:
                                    relative.as_posix())
         return _preview(diff, limit)
 
+    # --- file browser and editor ------------------------------------------------------------------
+
+    @staticmethod
+    def _file_target(workspace: Path, path: str) -> Path:
+        """Resolves a workspace-relative file path, rejecting anything that escapes the workspace
+        (symlinks included) or reaches into Git's own directory."""
+        relative = Path(path)
+        if not path or "\0" in path or relative.is_absolute() or ".." in relative.parts or ".git" in relative.parts:
+            raise ApiException.bad_request("Invalid file path")
+        root = workspace.resolve()
+        target = (workspace / relative).resolve()
+        if not target.is_relative_to(root) or ".git" in target.relative_to(root).parts:
+            raise ApiException.bad_request("Invalid file path")
+        return target
+
+    async def list_files(self, workspace: Path) -> FileListing:
+        """Every file of the working tree the .gitignore files and the excluded directories leave
+        visible: tracked and untracked, deleted ones and nested repositories left out."""
+        settings = get_settings()
+        excluded = [f"/{directory.strip('/')}/" for directory in settings.changes_excluded_directories]
+        raw = await self._git("--literal-pathspecs", "-C", str(workspace), "ls-files", "--cached", "--others",
+                              "--exclude-standard", "-z")
+        candidates = sorted({path for path in raw.split("\0")
+                             if path and not path.endswith("/") and not any(mark in f"/{path}" for mark in excluded)})
+        root = workspace.resolve()
+
+        def existing() -> list[str]:
+            return [path for path in candidates if (root / path).is_file()]
+
+        paths = await asyncio.to_thread(existing)
+        limit = settings.files_max_listed
+        return FileListing(paths=paths[:limit], truncated=len(paths) > limit)
+
+    async def read_file(self, workspace: Path, path: str) -> FileContent:
+        target = self._file_target(workspace, path)
+        limit = get_settings().changes_preview_max_bytes
+
+        def load() -> FileContent:
+            try:
+                if not target.is_file():
+                    raise ApiException.not_found("File not found")
+                size = target.stat().st_size
+                if size > limit:
+                    return FileContent(preview="too_large", size=size)
+                data = target.read_bytes()
+            except OSError:
+                raise ApiException.not_found("File not found") from None
+            if b"\0" in data[:8192]:
+                return FileContent(preview="binary", size=size)
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError:
+                return FileContent(preview="binary", size=size)
+            return FileContent(preview="text", content=text, revision=hashlib.sha256(data).hexdigest(), size=size)
+
+        return await asyncio.to_thread(load)
+
+    async def write_file(self, workspace: Path, path: str, content: str, base_revision: str) -> FileContent:
+        """Replaces an existing text file atomically, but only when it still has the revision the
+        editor read, so an edit by the agent in the meantime is reported, never overwritten."""
+        target = self._file_target(workspace, path)
+        data = content.encode("utf-8")
+        if len(data) > get_settings().changes_preview_max_bytes:
+            raise ApiException.bad_request("This file is too large to save from the editor")
+
+        def store() -> FileContent:
+            if not target.is_file():
+                raise ApiException.not_found("File not found")
+            if hashlib.sha256(target.read_bytes()).hexdigest() != base_revision:
+                raise ApiException.conflict("This file changed since you opened it. Reload it to keep both edits")
+            temporary = target.with_name(f".{target.name}.{uuid4().hex}.mooi-tmp")
+            try:
+                temporary.write_bytes(data)
+                shutil.copymode(target, temporary)
+                os.replace(temporary, target)
+            except OSError:
+                temporary.unlink(missing_ok=True)
+                raise ApiException.bad_gateway("Could not save the file") from None
+            return FileContent(preview="text", content=content, revision=hashlib.sha256(data).hexdigest(),
+                               size=len(data))
+
+        return await asyncio.to_thread(store)
+
 
 def _visible_pathspec() -> list[str]:
     """Pathspec of the whole tree minus the excluded directories, at any depth."""
@@ -656,6 +755,18 @@ async def changes(workspace: Path, base_commit: str) -> ChangesSummary:
 
 async def file_diff(workspace: Path, base_commit: str, path: str) -> FileDiff:
     return await get_workspaces().file_diff(workspace, base_commit, path)
+
+
+async def list_files(workspace: Path) -> FileListing:
+    return await get_workspaces().list_files(workspace)
+
+
+async def read_file(workspace: Path, path: str) -> FileContent:
+    return await get_workspaces().read_file(workspace, path)
+
+
+async def write_file(workspace: Path, path: str, content: str, base_revision: str) -> FileContent:
+    return await get_workspaces().write_file(workspace, path, content, base_revision)
 
 
 async def preview_merge(workspace: Path, target: str, token: str) -> MergePreview:

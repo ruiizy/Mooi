@@ -2,6 +2,7 @@ import { authenticatedFetch } from '@/features/auth/lib/authenticatedFetch';
 import type { GithubAuthorizationResponse } from '@/features/github/types/GithubAuthorizationResponse';
 import type { GithubConnection } from '@/features/github/types/GithubConnection';
 import type { GithubConnectionResponse } from '@/features/github/types/GithubConnectionResponse';
+import { apiErrorMessage } from '@/shared/utils/apiErrorMessage';
 
 const AUTHORIZATION_PATH = '/me/github/authorization';
 const CONNECTION_PATH = '/me/github/connection';
@@ -17,7 +18,7 @@ export const startGithubAuthorization = async (): Promise<GithubAuthorizationRes
   const response = await authenticatedFetch(AUTHORIZATION_PATH, { method: 'POST' });
 
   if (!response.ok) {
-    throw new Error(`Request to ${AUTHORIZATION_PATH} failed with ${response.status}`);
+    throw new Error(await apiErrorMessage(response, 'Could not start the GitHub authorization.'));
   }
 
   return (await response.json()) as GithubAuthorizationResponse;

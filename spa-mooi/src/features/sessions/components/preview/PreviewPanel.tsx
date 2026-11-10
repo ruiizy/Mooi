@@ -1,4 +1,3 @@
-import { usePreviewActivity } from '@/features/sessions/hooks/usePreviewActivity';
 import { PreviewDiagnostics } from './PreviewDiagnostics';
 import { usePreviewFullscreen } from '@/features/sessions/hooks/usePreviewFullscreen';
 import { IconButton } from '@/shared/components/IconButton';
@@ -15,7 +14,7 @@ import { COMPACT_LAYOUT_QUERY } from '@/features/sessions/lib/previewViewports';
 import { previewUrl } from '@/features/sessions/lib/previewUrl';
 import type { DeploymentSnapshot } from '@/features/sessions/types/DeploymentSnapshot';
 
-export const PreviewPanel = ({ sessionId, deployment, visible }: { sessionId: string; deployment: DeploymentSnapshot; visible: boolean }) => {
+export const PreviewPanel = ({ deployment, visible }: { deployment: DeploymentSnapshot; visible: boolean }) => {
   // Phones start where their own users are; desktops on the real 1920×1080 layout.
   const [device, setDevice] = useState<PreviewDevice>(() => (window.matchMedia(COMPACT_LAYOUT_QUERY).matches ? 'mobile' : 'desktop'));
   // A scaled desktop is hard to tap on touch screens: there, gestures move and zoom it by default.
@@ -24,7 +23,6 @@ export const PreviewPanel = ({ sessionId, deployment, visible }: { sessionId: st
   const [reload, setReload] = useState(0);
   const url = deployment.state === 'running' ? previewUrl(deployment.previewUrl) : null;
   const { panelRef, expanded, fullscreen, toggle } = usePreviewFullscreen(Boolean(url) && visible);
-  const activityFailed = usePreviewActivity(sessionId, visible && deployment.state === 'running');
   if (url) {
     return <div ref={panelRef} className={cn("flex h-full min-h-0 flex-col overflow-hidden bg-surface-2", expanded && "fixed inset-x-0 top-(--app-offset) z-50 h-app")}>
       <PreviewToolbar device={device} onDeviceChange={setDevice} onReload={() => setReload((value) => value + 1)}>
@@ -34,7 +32,7 @@ export const PreviewPanel = ({ sessionId, deployment, visible }: { sessionId: st
       <PreviewViewport device={device} zoom={zoom} navigating={navigating}>
         <PreviewFrame key={`${deployment.operationId}:${url}:${reload}`} url={url} />
       </PreviewViewport>
-      <PreviewDiagnostics url={url} activityFailed={activityFailed} />
+      <PreviewDiagnostics url={url} />
     </div>;
   }
 

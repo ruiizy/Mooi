@@ -1,83 +1,42 @@
-import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
-import { ArrowLeft, CircleAlert, CircleCheck, LoaderCircle, ShieldCheck } from 'lucide-react';
-import { ROUTES } from '@/app/routes';
-import { authenticatedFetch } from '@/features/auth/lib/authenticatedFetch';
-import { Card } from '@/shared/components/Card';
-import { buttonStyles } from '@/shared/styles/buttonStyles';
-import { AdminModelDefaults } from '@/features/agents/components/AdminModelDefaults';
+import { useSearchParams } from 'react-router-dom';
+import { Bot, Users } from 'lucide-react';
+import { AdminUsersPanel } from '@/features/admin/components/AdminUsersPanel';
+import { AdminAgentDefaults } from '@/features/agents/components/AdminAgentDefaults';
+import { Tabs } from '@/shared/components/Tabs';
 
-type PingState = 'loading' | 'ok' | 'error';
+const USERS_TAB = 'users';
+const AGENTS_TAB = 'agents';
+const TABS = new Set([USERS_TAB, AGENTS_TAB]);
 
+/**
+ * The platform console. The active section lives in `?tab=` so a reload lands back on it; each
+ * section mounts only while shown, so the live user directory streams only while it is open.
+ */
 export const AdminPage = () => {
-  const [state, setState] = useState<PingState>('loading');
-
-  useEffect(() => {
-    let cancelled = false;
-
-    authenticatedFetch('/admin/ping')
-      .then((response) => {
-        if (!cancelled) {
-          setState(response.ok ? 'ok' : 'error');
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setState('error');
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requested = searchParams.get('tab');
+  const tab = requested && TABS.has(requested) ? requested : USERS_TAB;
 
   return (
-    <div className="mx-auto w-full max-w-6xl px-5 pt-7 pb-[calc(1.75rem+var(--safe-bottom))] sm:px-8 lg:px-10 lg:pt-10 lg:pb-10">
-      <h1 className="text-[32px] font-extrabold tracking-[-0.045em] text-ink sm:text-[38px]">Admin</h1>
-      <p className="mt-1.5 text-sm text-ink-muted">
-        Manage and check access to your workspace.
-      </p>
+    <div className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-5 pt-7 pb-[calc(1.75rem+var(--safe-bottom))] sm:px-8 lg:px-10 lg:pt-10 lg:pb-10">
+      <header>
+        <p className="mb-2 font-mono text-[10.5px] font-medium tracking-[0.12em] text-ink-subtle uppercase">Platform</p>
+        <h1 className="text-[30px] leading-[1.1] font-semibold tracking-[-0.04em] text-ink sm:text-[34px]">Admin</h1>
+        <p className="mt-1.5 text-sm text-ink-muted">Follow who uses the platform live and set its defaults.</p>
+      </header>
 
-      <Card className="mt-6 p-5 sm:p-6">
-        <div className="flex items-center gap-3">
-          <span className="flex size-11 shrink-0 items-center justify-center rounded-[10px] bg-surface-2 text-ink-muted">
-            <ShieldCheck className="size-5" />
-          </span>
-          <p className="font-mono text-xs text-ink-subtle">Workspace access</p>
-        </div>
+      <Tabs
+        ariaLabel="Admin sections"
+        value={tab}
+        onChange={(next) => setSearchParams(next === USERS_TAB ? {} : { tab: next }, { replace: true })}
+        className="-mb-2 border-b border-line"
+        items={[
+          { id: USERS_TAB, label: 'Users', icon: Users },
+          { id: AGENTS_TAB, label: 'Agents', icon: Bot },
+        ]}
+      />
 
-        <p
-          data-state={state}
-          className="mt-3 inline-flex items-center gap-2 rounded-[10px] border px-3 py-2 text-sm font-bold data-[state=error]:border-danger/30 data-[state=error]:bg-danger-soft data-[state=error]:text-danger data-[state=loading]:border-line data-[state=loading]:bg-surface-2 data-[state=loading]:text-ink-subtle data-[state=ok]:border-success/30 data-[state=ok]:bg-success-soft data-[state=ok]:text-success"
-        >
-          {state === 'loading' && (
-            <>
-              <LoaderCircle className="size-4 animate-spin" />
-              Checking…
-            </>
-          )}
-          {state === 'ok' && (
-            <>
-              <CircleCheck className="size-4" />
-              Administrator access verified
-            </>
-          )}
-          {state === 'error' && (
-            <>
-              <CircleAlert className="size-4" />
-              Access could not be verified
-            </>
-          )}
-        </p>
-      </Card>
-
-      {state === 'ok' && <AdminModelDefaults />}
-
-      <Link to={ROUTES.projects} className={buttonStyles('ghost', 'sm', 'mt-6 -ml-3.5')}>
-        <ArrowLeft className="size-4" />
-        Back to projects
-      </Link>
+      {tab === AGENTS_TAB ? <AdminAgentDefaults /> : <AdminUsersPanel />}
     </div>
   );
 };

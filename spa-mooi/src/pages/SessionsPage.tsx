@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { useLocation, useSearchParams } from 'react-router-dom';
 import { MessagesSquare, RefreshCw, Search } from 'lucide-react';
 import { ROUTES } from '@/app/routes';
+import { useLiveStatus } from '@/features/live/hooks/useLiveStatus';
 import { useProjects } from '@/features/projects/hooks/useProjects';
 import { SessionGroupSection } from '@/features/sessions/components/overview/SessionGroupSection';
 import { SessionsOverviewHeader } from '@/features/sessions/components/overview/SessionsOverviewHeader';
@@ -16,7 +17,6 @@ import { EmptyState } from '@/shared/components/EmptyState';
 import { Tabs } from '@/shared/components/Tabs';
 import type { BackLink } from '@/shared/types/BackLink';
 import { useSessionsStore } from '@/stores/sessionsStore';
-import { useSessionsSyncStore } from '@/stores/sessionsSyncStore';
 
 const FILTER_PARAM = 'filter';
 
@@ -31,16 +31,14 @@ const Skeleton = () => (
 
 /**
  * Every live session of the player in one place, grouped by project, so checking on agents does
- * not mean opening each project. The list stays live through the shell's `useAllSessionsSync`; the active filter
+ * not mean opening each project. The list stays live through the player's channel; the active filter
  * lives in `?filter=` so a reload lands back on the same view.
  */
 export const SessionsPage = () => {
   const { projects } = useProjects();
   const allSessions = useSessionsStore((state) => state.sessions);
   const sessions = useMemo(() => allSessions.filter((session) => session.kind === 'session'), [allSessions]);
-  const loading = useSessionsSyncStore((state) => state.loading);
-  const error = useSessionsSyncStore((state) => state.error);
-  const reload = useSessionsSyncStore((state) => state.reload);
+  const { loading, error, reconnect: reload } = useLiveStatus();
   const [searchParams, setSearchParams] = useSearchParams();
   const [query, setQuery] = useState('');
   const [newSessionOpen, setNewSessionOpen] = useState(false);
@@ -70,7 +68,7 @@ export const SessionsPage = () => {
         refreshing={loading} onRefresh={reload} onNewSession={() => setNewSessionOpen(true)} />
 
       {error ? (
-        <div className="flex flex-col gap-3 rounded-[14px] border border-danger/30 bg-danger-soft px-4 py-3.5 sm:flex-row sm:items-center">
+        <div className="flex flex-col gap-3 rounded-card border border-danger/30 bg-danger-soft px-4 py-3.5 sm:flex-row sm:items-center">
           <p className="min-w-0 flex-1 text-sm text-danger">{error}</p>
           <span className="shrink-0">
             <Button variant="secondary" size="sm" onClick={reload}>

@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { fetchProductionDeployments } from '@/features/production/api/productionHistoryApi';
 import type { ProductionDeployment } from '@/features/production/types/ProductionDeployment';
+import { useLiveStore } from '@/stores/liveStore';
 
+/** Every project's persisted deployments, reloaded whenever the live channel reports one ended. */
 export const useProductionDeployments = (enabled: boolean) => {
+  const finished = useLiveStore((state) => state.finished.production);
   const [deployments, setDeployments] = useState<ProductionDeployment[]>([]);
   const [page, setPage] = useState(0);
   const [hasMore, setHasMore] = useState(false);
@@ -34,11 +37,8 @@ export const useProductionDeployments = (enabled: boolean) => {
     };
     setLoading(true);
     void refresh();
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') void refresh();
-    }, 15000);
-    return () => { active = false; window.clearInterval(timer); };
-  }, [enabled, revision, page]);
+    return () => { active = false; };
+  }, [enabled, revision, page, finished]);
 
   const loadMore = useCallback(async () => {
     if (loading || !hasMore) return;

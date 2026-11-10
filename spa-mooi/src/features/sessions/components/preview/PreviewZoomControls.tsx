@@ -14,7 +14,7 @@ export const PreviewZoomControls = ({ zoom, navigating, onNavigatingChange }: Pr
   <div className="flex items-center" role="group" aria-label="Preview zoom">
     <IconButton icon={ZoomOut} label="Zoom out" onClick={() => zoom.zoomBy(1 / PREVIEW_ZOOM_STEP)} className="max-sm:hidden" />
     <button type="button" onClick={zoom.fit} aria-label="Fit to panel" title="Fit to panel"
-      className="inline-flex h-11 min-w-12 items-center justify-center rounded-[10px] px-1.5 text-xs font-medium tabular-nums text-ink-muted transition hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand">
+      className="inline-flex h-11 min-w-12 items-center justify-center rounded-control px-1.5 text-xs font-medium tabular-nums text-ink-muted transition hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand">
       {Math.round(zoom.scale * 100)}%
     </button>
     <IconButton icon={ZoomIn} label="Zoom in" onClick={() => zoom.zoomBy(PREVIEW_ZOOM_STEP)} className="max-sm:hidden" />

@@ -28,7 +28,7 @@ interface UseSession {
   send: (text: string, images?: PreparedImage[]) => Promise<boolean>;
   interrupt: () => Promise<boolean>;
   recover: () => Promise<boolean>;
-  compact: () => Promise<boolean>;
+  compact: (instructions?: string) => Promise<boolean>;
   clearConversation: () => Promise<boolean>;
   allowPermission: (requestId: string, updatedInput?: Record<string, unknown>) => Promise<boolean>;
   denyPermission: (requestId: string, message?: string) => Promise<boolean>;
@@ -130,7 +130,7 @@ export const useSession = (sessionId: string | undefined): UseSession => {
     setModelOptions([]);
     setModelLoading(true);
     setModelError(null);
-    fetchSessionProvider(session.provider, session.connectionId)
+    fetchSessionProvider(session.provider, session.connectionId, false, session.adapter)
       .then((provider) => {
         if (!cancelled) {
           setModelOptions(provider.models ?? []);
@@ -145,7 +145,7 @@ export const useSession = (sessionId: string | undefined): UseSession => {
       });
 
     return () => { cancelled = true; };
-  }, [session?.provider, session?.connectionId]);
+  }, [session?.provider, session?.connectionId, session?.adapter]);
 
   const runAction = useCallback(async (action: () => Promise<unknown>): Promise<boolean> => {
     if (actionPending.current) return false;
@@ -192,8 +192,8 @@ export const useSession = (sessionId: string | undefined): UseSession => {
   );
 
   const compact = useCallback(
-    () => (sessionId && useSessionsStore.getState().sessions.some((item) => item.id === sessionId && item.status === 'ready')
-      ? runAction(() => compactSession(sessionId)) : Promise.resolve(false)),
+    (instructions?: string) => (sessionId && useSessionsStore.getState().sessions.some((item) => item.id === sessionId && item.status === 'ready')
+      ? runAction(() => compactSession(sessionId, instructions)) : Promise.resolve(false)),
     [sessionId, runAction],
   );
 

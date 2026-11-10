@@ -67,10 +67,10 @@ export const ProductionDeploymentDetailDialog = ({ deployment, projectName, onCl
         {onRedeploy && deployment.state !== 'running' ? <Button variant="secondary" size="sm" onClick={onRedeploy}><RotateCcw className="size-4" />Redeploy</Button> : null}
       </div>
     </div>
-    {confirmDelete ? <p className="mt-4 rounded-[10px] bg-surface-2 px-3.5 py-2.5 text-xs leading-relaxed text-ink-muted">
+    {confirmDelete ? <p className="mt-4 rounded-control bg-surface-2 px-3.5 py-2.5 text-xs leading-relaxed text-ink-muted">
       Removes this entry, its files and its output from Mooi. The deployed service and the current configuration stay in place.</p> : null}
 
-    {error ? <p role="alert" className="mt-4 rounded-[10px] border border-danger/30 bg-danger-soft px-4 py-2.5 text-sm text-danger">{error}</p>
+    {error ? <p role="alert" className="mt-4 rounded-control border border-danger/30 bg-danger-soft px-4 py-2.5 text-sm text-danger">{error}</p>
       : !detail ? <p className="mt-5 flex items-center gap-2 text-sm text-ink-muted"><LoaderCircle className="size-4 animate-spin" />Loading deployment…</p>
         : <div className="mt-5">
           <div role="tablist" aria-label="Deployment content" className="flex flex-wrap gap-1.5">
@@ -78,7 +78,7 @@ export const ProductionDeploymentDetailDialog = ({ deployment, projectName, onCl
               className={cn('rounded-lg px-3 py-1.5 font-mono text-xs font-bold transition',
                 selected === tab.id ? 'bg-contrast text-contrast-ink' : 'bg-surface-2 text-ink-muted hover:text-ink')}>{tab.label}</button>)}
           </div>
-          <pre role="tabpanel" className={cn('mt-3 max-h-[45dvh] overflow-auto rounded-[12px] p-4 font-mono text-xs leading-6 whitespace-pre-wrap break-all',
+          <pre role="tabpanel" className={cn('mt-3 max-h-[45dvh] overflow-auto rounded-xl p-4 font-mono text-xs leading-6 whitespace-pre-wrap break-all',
             selected === 'output' ? 'bg-neutral-950 text-neutral-100' : 'border border-line bg-surface-2 text-ink')}>{content}</pre>
           {!files ? <p className="mt-3 text-xs text-ink-subtle">This attempt predates saved file snapshots.</p> : null}
         </div>}

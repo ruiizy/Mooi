@@ -47,7 +47,7 @@ export const ActionsMenu = ({ label, children, className, indicator = false, ind
         title={label}
         onClick={() => setOpen((value) => !value)}
         className={cn(
-          'relative flex size-10 items-center justify-center rounded-[10px] transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand',
+          'relative flex size-10 items-center justify-center rounded-control transition-[background-color,color,transform] duration-150 active:scale-95 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand',
           open ? 'bg-surface-2 text-ink' : 'text-ink-muted hover:bg-surface-2 hover:text-ink',
           className,
         )}
@@ -71,7 +71,7 @@ export const ActionsMenu = ({ label, children, className, indicator = false, ind
             }
             if (event.key === 'Tab') dismiss();
           }}
-          className="absolute top-full right-0 z-50 mt-2 max-h-[min(20rem,calc(100dvh-5rem))] w-[min(15rem,calc(100vw-2rem))] origin-top-right overflow-y-auto overscroll-contain animate-menu-in rounded-2xl border border-line bg-surface p-1.5 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.35)]"
+          className="absolute top-full right-0 z-50 mt-2 max-h-[min(20rem,calc(100dvh-5rem))] w-[min(15rem,calc(100vw-2rem))] origin-top-right overflow-y-auto overscroll-contain animate-menu-in rounded-xl border border-line bg-surface p-1 shadow-pop"
         >
           {children(dismiss)}
         </div>

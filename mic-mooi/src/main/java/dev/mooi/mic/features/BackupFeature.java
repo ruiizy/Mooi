@@ -1,5 +1,6 @@
 package dev.mooi.mic.features;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
@@ -85,13 +86,19 @@ public class BackupFeature {
         return service.startOperation(projectId, principal.player().id(), backupId, body);
     }
 
-    @PutMapping("/me/projects/{projectId}/backups/{backupId}/operations/{operationId}")
-    @Auth.Authenticated
-    @Auth.ServiceCall
+    /** Service-only: an operation may outlive the access token of the player who started it. */
+    @PutMapping("/internal/projects/{projectId}/backups/{backupId}/operations/{operationId}")
+    @Auth.ServiceOnly
     public OperationPayload finishOperation(@PathVariable UUID projectId, @PathVariable UUID backupId,
-                                            @PathVariable UUID operationId, @Valid @RequestBody FinishOperation body,
-                                            Auth.Principal principal) {
-        return service.finishOperation(projectId, principal.player().id(), backupId, operationId, body);
+                                            @PathVariable UUID operationId, @Valid @RequestBody FinishOperation body) {
+        return service.finishOperation(projectId, backupId, operationId, body);
+    }
+
+    /** The runner names the operations it still runs; every other unfinished one was orphaned by a restart. */
+    @PostMapping("/internal/backups/operations/reconcile")
+    @Auth.ServiceOnly
+    public Reconciled reconcile(@Valid @RequestBody ReconcileOperations body) {
+        return new Reconciled(service.interruptOrphans(Set.copyOf(body.active())));
     }
 
     /** Forgets the backup without running delete.sh: its stored data, if any, stays where it is. */
@@ -111,6 +118,8 @@ public class BackupFeature {
                                  @NotBlank @Size(max = 65536) String script) { }
     public record FinishOperation(@NotBlank String state, @Size(max = 2000) String message,
                                   @Size(max = 2000) List<String> logs) { }
+    public record ReconcileOperations(@NotNull @Size(max = 1000) List<@NotNull UUID> active) { }
+    public record Reconciled(int interrupted) { }
     public record BackupPayload(UUID id, UUID projectId, UUID sessionId, String releaseTag, String state,
                                 Instant startedAt, Instant finishedAt, Instant verifiedAt, Instant restoredAt) { }
     public record OperationPayload(UUID operationId, UUID backupId, String action, String target, String state,
@@ -125,6 +134,9 @@ public class BackupFeature {
         private static final Set<String> ACTIONS = Set.of("restore", "delete");
         private static final Set<String> TARGETS = Set.of("production", "verification");
         private static final Set<String> OUTCOMES = Set.of("succeeded", "failed");
+        /** A run this recent may still be starting while the runner names its active ones: the next sweep sees it. */
+        private static final Duration SETTLING = Duration.ofMinutes(1);
+        private static final String INTERRUPTED = "Backup operation interrupted: its runner stopped before it finished";
 
         private final BackupRepository backups;
         private final OperationRepository operations;
@@ -217,25 +229,40 @@ public class BackupFeature {
         }
 
         @Transactional
-        public OperationPayload finishOperation(UUID projectId, UUID playerId, UUID backupId, UUID operationId,
-                                                FinishOperation input) {
-            var backup = owned(projectId, playerId, backupId);
+        public OperationPayload finishOperation(UUID projectId, UUID backupId, UUID operationId, FinishOperation input) {
             if (!OUTCOMES.contains(input.state())) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid operation state");
             }
+            var backup = backups.findById(backupId).filter(row -> row.getProjectId().equals(projectId))
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Backup not found"));
             var operation = operations.findById(operationId).filter(row -> row.getBackupId().equals(backupId))
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Operation not found"));
+            return conclude(backup, operation, input.state(), input.message(), input.logs());
+        }
+
+        /** Fails every unfinished operation outside `active`, with its backup when it was the backup run itself. */
+        @Transactional
+        public int interruptOrphans(Set<UUID> active) {
+            var orphans = operations.findByFinishedAtIsNullAndStartedAtBefore(Instant.now().minus(SETTLING))
+                    .stream().filter(row -> !active.contains(row.getOperationId())).toList();
+            orphans.forEach(operation -> backups.findById(operation.getBackupId()).ifPresent(backup ->
+                    conclude(backup, operation, "failed", INTERRUPTED, null)));
+            return orphans.size();
+        }
+
+        /** The first outcome wins: a later finish or reconcile never rewrites a concluded operation. */
+        private OperationPayload conclude(Backup backup, Operation operation, String state, String message,
+                                          List<String> logs) {
             if (operation.getFinishedAt() != null) return operationPayload(operation);
             var now = Instant.now();
-            operation.setState(input.state());
+            operation.setState(state);
             operation.setFinishedAt(now);
-            operation.setResultMessage(input.message() == null ? null : box.encrypt(input.message()));
-            operation.setResultLogs(input.logs() == null || input.logs().isEmpty() ? null
-                    : box.encrypt(String.join("\n", input.logs())));
-            var succeeded = input.state().equals("succeeded");
+            operation.setResultMessage(message == null ? null : box.encrypt(message));
+            operation.setResultLogs(logs == null || logs.isEmpty() ? null : box.encrypt(String.join("\n", logs)));
+            var succeeded = state.equals("succeeded");
             switch (operation.getAction()) {
                 case "backup" -> {
-                    backup.setState(input.state());
+                    backup.setState(state);
                     backup.setFinishedAt(now);
                 }
                 case "restore" -> {
@@ -329,6 +356,7 @@ public class BackupFeature {
     }
     public interface OperationRepository extends JpaRepository<Operation, UUID> {
         List<Operation> findByBackupIdOrderByStartedAtDesc(UUID backupId);
+        List<Operation> findByFinishedAtIsNullAndStartedAtBefore(Instant cutoff);
     }
     public interface ProjectRepository extends JpaRepository<ProjectReference, UUID> {
         boolean existsByIdAndPlayerId(UUID id, UUID playerId);

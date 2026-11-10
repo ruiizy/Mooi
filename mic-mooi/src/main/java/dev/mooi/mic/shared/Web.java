@@ -41,6 +41,7 @@ public class Web {
                         .allowedOrigins(allowedOrigins)
                         .allowedMethods("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
                         .allowedHeaders("*")
+                        .allowCredentials(true)
                         .exposedHeaders(Logging.CORRELATION_ID_HEADER)
                         .maxAge(3600);
             }

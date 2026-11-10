@@ -1,4 +1,6 @@
+import type { AdminAgentProvider } from '@/features/agents/types/AdminAgentProvider';
 import type { EngineDefaults } from '@/features/agents/types/EngineDefaults';
+import { sessionsFetch } from '@/features/sessions/lib/sessionsFetch';
 import { authenticatedFetch } from '@/features/auth/lib/authenticatedFetch';
 import type { AgentAuthorizationResponse } from '@/features/agents/types/AgentAuthorizationResponse';
 import type { AgentConnection } from '@/features/agents/types/AgentConnection';
@@ -37,9 +39,9 @@ export const fetchAgentConnections = async (): Promise<AgentConnection[]> => {
 };
 
 /**
- * Opens the flow. The API answers with a ready-made URL carrying a state it signed for this
- * caller and provider, so nothing here has to know a client id or protect the round trip itself.
- * `409` means OAuth is not configured for this provider — the caller falls back to a pasted token.
+ * Opens the sign-in. The API answers with a ready-made URL and the state it signed for this caller
+ * and provider (it carries the PKCE verifier), so nothing here has to know a client id or protect the
+ * round trip itself. `409` means OAuth is turned off for this provider.
  */
 export const startAgentAuthorization = async (provider: string): Promise<AgentAuthorizationResponse> => {
   const response = await authenticatedFetch(authorizationPath(provider), { method: 'POST' });
@@ -51,7 +53,10 @@ export const startAgentAuthorization = async (provider: string): Promise<AgentAu
   return (await response.json()) as AgentAuthorizationResponse;
 };
 
-/** Redeems the authorization code. Sent with the caller's own token, which is what binds the link. */
+/**
+ * Redeems the code the provider showed (Claude shows `code#state`, sent as pasted). Sent with the
+ * caller's own token, which is what binds the link.
+ */
 export const completeAgentAuthorization = async (
   provider: string,
   code: string,
@@ -116,7 +121,13 @@ export const saveEngineDefaults = async (defaults: EngineDefaults): Promise<Engi
   return response.json();
 };
 
-export const selectDefaultAccount = async (connectionId: string | null): Promise<AgentConnection[]> => {
+export const fetchAdminAgentProviders = async (): Promise<AdminAgentProvider[]> => {
+  const response = await sessionsFetch('/admin/agents/providers');
+  if (!response.ok) throw new Error(await apiErrorMessage(response, 'Could not load the agent providers.'));
+  return ((await response.json()) as { providers: AdminAgentProvider[] }).providers;
+};
+
+export const selectDefaultAccount =async (connectionId: string | null): Promise<AgentConnection[]> => {
   const response = await authenticatedFetch('/me/agents/default-account', {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ connectionId }),
   });

@@ -112,7 +112,7 @@ def install(app: FastAPI) -> None:
         allow_origins=[settings.cors_origin],
         allow_methods=["*"],
         allow_headers=["*"],
-        expose_headers=[CORRELATION_ID_HEADER],
+        expose_headers=[CORRELATION_ID_HEADER, "Content-Disposition"],
     )
 
     @app.exception_handler(ApiException)

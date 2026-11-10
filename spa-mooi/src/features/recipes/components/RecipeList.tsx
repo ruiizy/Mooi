@@ -18,7 +18,7 @@ export const RecipeList = ({ state, recipes, selectedSlug, emptyHint, onSelect, 
   if (state.status === 'error' && state.recipes.length === 0) {
     return (
       <div className="flex flex-col items-start gap-3 p-2">
-        <p role="alert" className="rounded-[10px] border border-danger/30 bg-danger-soft px-3 py-2 text-sm text-danger">{state.error}</p>
+        <p role="alert" className="rounded-control border border-danger/30 bg-danger-soft px-3 py-2 text-sm text-danger">{state.error}</p>
         <Button variant="secondary" size="sm" onClick={onRetry}><RefreshCw className="size-4" /> Try again</Button>
       </div>
     );

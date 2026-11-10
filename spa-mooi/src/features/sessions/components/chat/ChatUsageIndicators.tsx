@@ -3,6 +3,7 @@ import { Activity, Eraser, Layers3, LoaderCircle } from 'lucide-react';
 import { useOnClickOutside } from '@/shared/hooks/useOnClickOutside';
 import { useOnEscape } from '@/shared/hooks/useOnEscape';
 import { cn } from '@/shared/utils/cn';
+import { fiveHourLimit } from '@/features/sessions/lib/fiveHourLimit';
 import type { SessionUsage } from '@/features/sessions/types/SessionUsage';
 import type { UsageMetric } from '@/features/sessions/types/UsageMetric';
 
@@ -40,7 +41,7 @@ interface ChatUsageIndicatorsProps {
 
 export const ChatUsageIndicators = ({ usage, loading = false, actionsDisabled, onCompact, onClear }: ChatUsageIndicatorsProps) => {
   const quotas = usage?.quota ?? {};
-  const fiveHour = quotas.five_hour ?? quotas.primary;
+  const fiveHour = fiveHourLimit(usage);
   const weekly = quotas.seven_day ?? quotas.secondary;
   const extras = Object.entries(quotas).filter(([key]) => !['five_hour', 'primary', 'seven_day', 'secondary'].includes(key));
   const context = usage?.context;
@@ -66,7 +67,7 @@ export const ChatUsageIndicators = ({ usage, loading = false, actionsDisabled, o
       <span className={cn('absolute bottom-full left-0 z-50 w-max max-w-[calc(100vw-2rem)] pb-2 transition duration-150', open
         ? 'pointer-events-auto visible opacity-100'
         : 'pointer-events-none invisible opacity-0 group-hover/context:pointer-events-auto group-hover/context:visible group-hover/context:opacity-100 group-focus-within/context:pointer-events-auto group-focus-within/context:visible group-focus-within/context:opacity-100')}>
-        <span className="flex min-w-56 flex-col gap-2 rounded-xl border border-line-strong bg-surface p-3 font-sans text-xs font-medium normal-case text-ink shadow-[0_12px_32px_rgb(0_0_0/0.2)] dark:shadow-[0_12px_32px_rgb(0_0_0/0.6)]">
+        <span className="flex min-w-56 flex-col gap-2 rounded-xl border border-line-strong bg-surface p-3 font-sans text-xs font-medium normal-case text-ink shadow-pop">
         <Row label="Context used" metric={context} loading={loading} />
         {context?.limitTokens != null && <span className="text-ink-subtle">{(context.usedTokens ?? 0).toLocaleString()} / {context.limitTokens.toLocaleString()} tokens</span>}
         <span className="h-px bg-line" />

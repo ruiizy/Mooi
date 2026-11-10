@@ -13,8 +13,9 @@ let engine: Engine | null = null;
  * The page's single dictation audio engine: one AudioContext with the worklet loaded, shared by
  * every dictation and only suspended between them. iOS (WebKit) can feed silence into a context
  * created after another one was closed in the same page, so contexts are not recreated per
- * dictation. `discard` drops a misbehaving engine: the next dictation builds a fresh one, exactly
- * as after a page reload.
+ * dictation. It is only acquired once the microphone is open, so it never resumes across the audio
+ * route change that opening the microphone causes. `discard` drops a misbehaving engine: the next
+ * capture builds a fresh one, exactly as after a page reload.
  */
 export const acquireDictationAudio = async (): Promise<AudioContext> => {
   if (!engine || engine.context.state === 'closed') {
@@ -44,26 +45,8 @@ export const releaseDictationAudio = (context: AudioContext): void => {
   }).catch(() => undefined);
 };
 
-/** The engine produced no usable audio: close it so the next dictation starts from scratch. */
+/** The engine produced no usable audio: close it so the next capture starts from scratch. */
 export const discardDictationAudio = (context: AudioContext): void => {
   if (engine?.context === context) engine = null;
   if (context.state !== 'closed') void context.close().catch(() => undefined);
-};
-
-/** Reassert user activation before asynchronous microphone setup. */
-export const resumeDictationAudio = (): void => {
-  if (engine && engine.context.state !== 'closed') void engine.context.resume().catch(() => undefined);
-};
-
-/** WebKit may report running without processing samples: cycle the existing engine once. */
-export const restartDictationAudio = (context: AudioContext, active: () => boolean): Promise<void> => {
-  const current = engine;
-  if (!current || current.context !== context) return Promise.reject(new Error('audio engine unavailable'));
-  const restart = current.transition.then(async () => {
-    if (!active()) return;
-    await context.suspend();
-    if (active()) await context.resume();
-  });
-  current.transition = restart.catch(() => undefined);
-  return restart;
 };

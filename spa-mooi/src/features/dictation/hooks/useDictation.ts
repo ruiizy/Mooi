@@ -95,13 +95,12 @@ export const useDictation = (field: RefObject<DictationField | null>): Dictation
   const resumeAudio = useCallback(() => session.current?.resumeAudio(), []);
 
   const cancel = useCallback(() => {
-    session.current?.dispose();
     transcript.current?.rollback();
-    end();
-    setError(null);
-  }, [end]);
+    finish();
+  }, [finish]);
 
-  const isActive = useCallback(() => session.current !== null || stateRef.current !== 'idle', []);
+  // The state leaves `idle` only together with a session, and returns to it only without one.
+  const isActive = useCallback(() => session.current !== null, []);
 
   // A backgrounded app loses the microphone (iOS ends it outright): keep what was said, drop the rest.
   useEffect(() => {

@@ -48,14 +48,14 @@ export const DeploymentsPage = () => {
     <div className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-5 pt-7 pb-[calc(1.75rem+var(--safe-bottom))] sm:px-8 lg:px-10 lg:pt-10 lg:pb-10">
       <header className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <p className="mb-2 text-[11px] font-extrabold tracking-[0.09em] text-ink-subtle uppercase">Production</p>
-          <h1 className="text-[28px] leading-tight font-extrabold tracking-[-0.035em] text-ink sm:text-[32px]">Deployments</h1>
+          <p className="mb-2 font-mono text-[10.5px] font-medium tracking-[0.12em] text-ink-subtle uppercase">Production</p>
+          <h1 className="text-[30px] leading-[1.1] font-semibold tracking-[-0.04em] text-ink sm:text-[34px]">Deployments</h1>
           <p className="mt-1.5 max-w-2xl text-sm leading-relaxed text-ink-muted">Open a project to prepare, deploy and watch its production release.</p>
         </div>
         <dl className="flex gap-6">
-          <div><dt className="text-[11px] font-extrabold tracking-[0.09em] text-ink-subtle uppercase">Projects</dt>
+          <div><dt className="font-mono text-[10.5px] font-medium tracking-[0.12em] text-ink-subtle uppercase">Projects</dt>
             <dd className="text-xl font-extrabold text-ink tabular-nums">{projects.length}</dd></div>
-          <div><dt className="text-[11px] font-extrabold tracking-[0.09em] text-ink-subtle uppercase">Live</dt>
+          <div><dt className="font-mono text-[10.5px] font-medium tracking-[0.12em] text-ink-subtle uppercase">Live</dt>
             <dd className="text-xl font-extrabold text-ink tabular-nums">{live}</dd></div>
         </dl>
       </header>
@@ -66,7 +66,7 @@ export const DeploymentsPage = () => {
           { id: HISTORY_TAB, label: 'History', icon: History }]} />
 
       {tab === 'projects' ? <section aria-label="Projects" className="flex flex-col gap-4">
-        {projectsError ? <div role="alert" className="flex items-center justify-between gap-3 rounded-[12px] bg-danger-soft px-4 py-3 text-sm text-danger">
+        {projectsError ? <div role="alert" className="flex items-center justify-between gap-3 rounded-xl bg-danger-soft px-4 py-3 text-sm text-danger">
           <span>{projectsError}</span><Button variant="secondary" size="sm" onClick={reloadProjects}>Retry</Button>
         </div> : null}
         {projects.length > 6 ? <SearchInput value={query} onChange={setQuery} placeholder="Search projects" className="sm:max-w-sm" /> : null}
@@ -78,7 +78,7 @@ export const DeploymentsPage = () => {
                 {visibleProjects.map((project) => <ProductionProjectCard key={project.id} project={project} latest={latestByProject.get(project.id)} />)}
               </div>}
       </section> : <section aria-label="History" className="flex flex-col gap-4">
-        {history.error ? <div role="alert" className="flex items-center justify-between gap-3 rounded-[12px] bg-danger-soft px-4 py-3 text-sm text-danger">
+        {history.error ? <div role="alert" className="flex items-center justify-between gap-3 rounded-xl bg-danger-soft px-4 py-3 text-sm text-danger">
           <span>{history.error}</span><Button variant="secondary" size="sm" onClick={history.reload}>Retry</Button>
         </div> : null}
         {history.loading && history.deployments.length === 0 ? <Card className="h-48 animate-pulse-soft" />

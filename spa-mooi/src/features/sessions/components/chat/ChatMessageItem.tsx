@@ -2,9 +2,7 @@ import { memo } from 'react';
 import { CircleAlert } from 'lucide-react';
 import { MessageImageGrid } from './MessageImageGrid';
 import { NoticeItem } from './NoticeItem';
-import { transcriptBlockKey } from '@/features/sessions/lib/transcriptBlockKey';
-import { TranscriptContent } from './TranscriptContent';
-import { ThinkingIndicator } from '@/features/sessions/components/chat/ThinkingIndicator';
+import { TurnBlocks } from './TurnBlocks';
 import { TurnFooter } from '@/features/sessions/components/chat/TurnFooter';
 import type { AgentCapabilities } from '@/features/sessions/types/AgentCapabilities';
 import type { TranscriptEntry } from '@/features/sessions/types/TranscriptEntry';
@@ -16,20 +14,21 @@ interface ChatMessageItemProps {
   entry: TranscriptEntry;
   providerLabel: string;
   capabilities: AgentCapabilities;
-  working: boolean;
+  /** The agent is working on this turn right now (not finished, not waiting on the user). */
+  live: boolean;
 }
 
 /**
- * One transcript row. An `assistant` entry is a whole turn, so its blocks — text, thinking and tool
- * steps — render in the order they actually happened rather than as text with a step list bolted
- * underneath. Optional blocks are gated on the session's capabilities, never on its provider id:
- * a provider without `thinking` never produces one, and one declaring the bare
- * minimum still renders correctly.
+ * One transcript row. An `assistant` entry is a whole turn: what the agent tells the user renders as
+ * text, and everything it does in between folds into activity blocks, in the order it happened (see
+ * `TurnBlocks`); a delegation to another agent is a card nesting that agent's own work. While the
+ * turn is live, the open block — or a fresh one once the agent has spoken — names what it is doing. Optional blocks are gated on the session's capabilities, never
+ * on its provider id: a provider without `thinking` never shows one.
  */
-export const ChatMessageItem = memo(function ChatMessageItem({ sessionId, entry, providerLabel, capabilities, working }: ChatMessageItemProps) {
+export const ChatMessageItem = memo(function ChatMessageItem({ sessionId, entry, providerLabel, capabilities, live }: ChatMessageItemProps) {
   if (entry.kind === 'error') {
     return (
-      <li className="flex items-start gap-2.5 rounded-xl border border-danger/40 bg-danger-soft px-3.5 py-2.5 text-sm leading-relaxed text-danger">
+      <li className="flex animate-fade-up items-start gap-2.5 rounded-xl border border-danger/30 bg-danger-soft px-3.5 py-2.5 text-sm leading-relaxed text-danger">
         <CircleAlert className="mt-0.5 size-4 shrink-0" />
         <span className="min-w-0 flex-1 break-words">{entry.text}</span>
       </li>
@@ -42,39 +41,31 @@ export const ChatMessageItem = memo(function ChatMessageItem({ sessionId, entry,
 
   if (entry.kind === 'user') {
     return (
-      <li className="flex flex-col items-end gap-1.5">
+      <li className="flex animate-fade-up flex-col items-end gap-1.5">
         {entry.images.length > 0 ? <MessageImageGrid sessionId={sessionId} images={entry.images} /> : null}
         {entry.text ? (
-          <p className="max-w-[95%] sm:max-w-[85%] break-words rounded-2xl rounded-br-md bg-surface-2 px-5 py-3.5 text-[15px] leading-relaxed whitespace-pre-wrap text-ink">
+          <p className="max-w-[95%] break-words rounded-[18px] rounded-br-[6px] border border-brand/15 bg-brand-soft px-4 py-3 text-[15px] leading-relaxed whitespace-pre-wrap text-ink sm:max-w-[85%] sm:px-5 sm:py-3.5">
             {entry.text}
           </p>
         ) : null}
-        <span className="text-xs text-ink-subtle">{formatTime(entry.at)}</span>
+        <span className="font-mono text-[10.5px] text-ink-subtle">{formatTime(entry.at)}</span>
       </li>
     );
   }
 
   return (
-    <li className="flex gap-2 sm:gap-4">
-      <LogoMark className="hidden size-8 shrink-0 sm:block rounded-lg" />
+    <li className="flex animate-fade-up gap-2 sm:gap-4">
+      <LogoMark className="hidden size-7 shrink-0 drop-shadow-[0_2px_6px_rgb(39_110_241/0.25)] sm:block" />
 
       <div className="min-w-0 flex-1">
         <p className="flex items-center gap-2">
-          <span className="text-[13px] font-extrabold text-ink">{providerLabel}</span>
-          <span className="text-xs text-ink-subtle">{formatTime(entry.at)}</span>
+          <span className="text-[13px] font-semibold text-ink">{providerLabel}</span>
+          <span className="font-mono text-[10.5px] text-ink-subtle">{formatTime(entry.at)}</span>
         </p>
 
-        <div className="mt-1.5 flex flex-col gap-2">
-          {entry.blocks.map((block) => block.kind === 'thinking' && !capabilities.thinking ? null : (
-            <TranscriptContent key={transcriptBlockKey(block)} sessionId={sessionId} block={block} />
-          ))}
+        <div className="mt-1.5 flex flex-col gap-3">
+          <TurnBlocks sessionId={sessionId} blocks={entry.blocks} showThinking={capabilities.thinking} live={live} since={entry.at} />
         </div>
-
-        {entry.streaming && working ? (
-          <div className="mt-2">
-            <ThinkingIndicator />
-          </div>
-        ) : null}
 
         {entry.result ? <TurnFooter result={entry.result} showCost={capabilities.cost} /> : null}
       </div>

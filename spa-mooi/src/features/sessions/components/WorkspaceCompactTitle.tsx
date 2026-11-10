@@ -41,7 +41,7 @@ export const WorkspaceCompactTitle = ({ project, session }: WorkspaceCompactTitl
         <span className="truncate-start min-w-0 font-mono"><span dir="ltr">{session.branch}</span></span>
       </span>
       <span aria-hidden="true" className="mt-0.5 block truncate pl-5 text-[10px] leading-tight font-semibold text-ink-subtle">
-        {session.providerLabel}
+        {session.adapterLabel ?? session.providerLabel}
       </span>
     </TapTooltip>
   </div>

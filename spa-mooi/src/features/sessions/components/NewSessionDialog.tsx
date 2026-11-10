@@ -84,6 +84,7 @@ export const NewSessionDialog = ({
     void onCreate({
       projectId: project.id,
       provider: choice.provider,
+      adapter: choice.adapter || undefined,
       connectionId: choice.connectionId,
       model: choice.model,
       effort: choice.effort || null,
@@ -123,7 +124,7 @@ export const NewSessionDialog = ({
 
         {connections.length > 0 ? <label className="flex flex-col gap-2">
           <span className="text-xs font-medium text-ink-muted">Branch</span>
-          <span className="flex h-12 w-full items-center gap-2 rounded-[10px] border border-line bg-surface-2 px-3 transition focus-within:border-brand/50">
+          <span className="flex h-12 w-full items-center gap-2 rounded-control border border-line bg-surface-2 px-3 transition focus-within:border-brand/50">
             <GitBranch className="size-4 shrink-0 text-ink-subtle" />
             <input
               value={branch}
@@ -148,7 +149,7 @@ export const NewSessionDialog = ({
       </div>
 
       {actionError ? (
-        <p className="mt-4 rounded-[10px] border border-danger/30 bg-danger-soft px-4 py-2.5 text-sm text-danger">
+        <p className="mt-4 rounded-control border border-danger/30 bg-danger-soft px-4 py-2.5 text-sm text-danger">
           {actionError}
         </p>
       ) : null}

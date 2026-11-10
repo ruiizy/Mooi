@@ -4,6 +4,5 @@ import type { SessionResponse } from '@/features/auth/types/SessionResponse';
 /** Turns the server's relative `expiresIn` (seconds) into an absolute epoch-ms deadline. */
 export const toAuthSession = (response: SessionResponse): AuthSession => ({
   accessToken: response.accessToken,
-  refreshToken: response.refreshToken,
   expiresAt: Date.now() + response.expiresIn * 1000,
 });

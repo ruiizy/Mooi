@@ -53,12 +53,12 @@ export const ProductionReleaseDialog = ({ projectId, defaultBranch, busy, error,
     footer={<><Button variant="ghost" onClick={onClose} disabled={busy}>Cancel</Button>
       <Button variant="brand" disabled={!valid || busy || loading} onClick={() => onSelect(choice)}>
         {busy ? <LoaderCircle className="size-4 animate-spin" /> : <Rocket className="size-4" />}
-        {busy ? 'Starting…' : mode === 'create' ? `Publish ${choice.tag || 'release'} and deploy` : `Deploy ${choice.tag || 'release'}`}
+        {busy ? 'Starting…' : mode === 'create' ? 'Publish' : 'Deploy'}
       </Button></>}>
-    <div role="radiogroup" aria-label="Release source" className="grid grid-cols-2 gap-2 rounded-[12px] bg-surface-2 p-1">
+    <div role="radiogroup" aria-label="Release source" className="grid grid-cols-2 gap-2 rounded-xl bg-surface-2 p-1">
       {modes.map(({ id, icon: Icon, title, hint, disabled }) => <button key={id} type="button" role="radio" aria-checked={mode === id}
         disabled={disabled || busy} onClick={() => setMode(id)}
-        className={cn('flex min-w-0 items-center gap-2.5 rounded-[10px] px-3 py-2.5 text-left transition disabled:opacity-45 focus-visible:outline-2 focus-visible:outline-brand',
+        className={cn('flex min-w-0 items-center gap-2.5 rounded-control px-3 py-2.5 text-left transition disabled:opacity-45 focus-visible:outline-2 focus-visible:outline-brand',
           mode === id ? 'bg-surface text-ink shadow-sm' : 'text-ink-muted hover:text-ink')}>
         <Icon className="size-4 shrink-0" />
         <span className="min-w-0"><span className="block truncate text-sm font-bold">{title}</span>
@@ -70,7 +70,7 @@ export const ProductionReleaseDialog = ({ projectId, defaultBranch, busy, error,
       : mode === 'existing' ? <ul role="radiogroup" aria-label="Published releases" className="mt-5 flex max-h-[min(18rem,40dvh)] flex-col gap-1.5 overflow-y-auto overscroll-contain">
         {releases.map((release) => <li key={release.tag}>
           <button type="button" role="radio" aria-checked={selected === release.tag} disabled={busy} onClick={() => setSelected(release.tag)}
-            className={cn('flex w-full items-center gap-3 rounded-[10px] border px-3.5 py-3 text-left transition focus-visible:outline-2 focus-visible:outline-brand',
+            className={cn('flex w-full items-center gap-3 rounded-control border px-3.5 py-3 text-left transition focus-visible:outline-2 focus-visible:outline-brand',
               selected === release.tag ? 'border-ink bg-surface' : 'border-line hover:bg-surface-2')}>
             <span className="min-w-0 flex-1">
               <span className="block truncate font-mono text-sm font-bold text-ink">{release.tag}</span>
@@ -84,9 +84,9 @@ export const ProductionReleaseDialog = ({ projectId, defaultBranch, busy, error,
         <span className="text-xs font-medium text-ink-muted">Version</span>
         <input autoFocus autoCapitalize="none" autoCorrect="off" spellCheck={false} value={tag} onChange={(event) => setTag(event.target.value)} disabled={busy}
           placeholder="v1.0.0" aria-invalid={tag.length > 0 && !valid}
-          className="h-11 rounded-[10px] border border-line bg-surface-2 px-3 font-mono text-sm text-ink outline-none focus:border-brand/50" />
+          className="h-11 rounded-control border border-line bg-surface-2 px-3 font-mono text-sm text-ink outline-none focus:border-brand/50" />
         <span className="text-xs text-ink-subtle">Published on GitHub from the latest {defaultBranch ?? 'default branch'} commit when the deployment starts.</span>
       </label>}
-    {loadError || error ? <p role="alert" className="mt-4 rounded-[10px] border border-danger/30 bg-danger-soft px-4 py-2.5 text-sm text-danger">{error ?? loadError}</p> : null}
+    {loadError || error ? <p role="alert" className="mt-4 rounded-control border border-danger/30 bg-danger-soft px-4 py-2.5 text-sm text-danger">{error ?? loadError}</p> : null}
   </Modal>;
 };

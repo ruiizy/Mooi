@@ -1,25 +1,24 @@
 import { logout, logoutEverywhere } from '@/features/auth/api/authApi';
-import { getAccessToken } from '@/features/auth/lib/accessTokenProvider';
+import { dropAccessSession, getAccessToken } from '@/features/auth/lib/accessTokenProvider';
 import { useAuthStore } from '@/stores/authStore';
 
-/** Ends the local session first, then tells the server. The button always wins. */
-export const signOut = async (): Promise<void> => {
-  const session = useAuthStore.getState().session;
-
+const endLocally = (): void => {
+  dropAccessSession();
   useAuthStore.getState().clear();
+};
 
-  if (session) {
-    await logout(session.refreshToken).catch(() => {});
-  }
+/** Ends the local session first, then tells the server (which clears the cookie). The button always wins. */
+export const signOut = async (): Promise<void> => {
+  endLocally();
+  await logout().catch(() => {});
 };
 
 /** Revokes every session for the player, including this one. */
 export const signOutEverywhere = async (): Promise<void> => {
-  const token = await getAccessToken();
+  const token = await getAccessToken().catch(() => null);
 
-  useAuthStore.getState().clear();
+  endLocally();
 
-  if (token) {
-    await logoutEverywhere(token).catch(() => {});
-  }
+  // Without a token, at least end this device server side.
+  await (token ? logoutEverywhere(token) : logout()).catch(() => {});
 };

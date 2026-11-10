@@ -35,7 +35,8 @@ export const AccountPage = () => {
 
   return (
     <div className="mx-auto w-full max-w-6xl px-5 pt-7 pb-[calc(1.75rem+var(--safe-bottom))] sm:px-8 lg:px-10 lg:pt-10 lg:pb-10">
-      <h1 className="text-[32px] font-extrabold tracking-[-0.045em] text-ink sm:text-[38px]">
+      <p className="mb-2 font-mono text-[10.5px] font-medium tracking-[0.12em] text-ink-subtle uppercase">Settings</p>
+      <h1 className="text-[30px] leading-[1.1] font-semibold tracking-[-0.04em] text-ink sm:text-[34px]">
         Account
       </h1>
 

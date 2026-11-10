@@ -26,7 +26,7 @@ export const ComposerSelect = ({ value, options, onChange, disabled, ariaLabel, 
         disabled={disabled}
         aria-label={ariaLabel}
         aria-describedby={describedBy}
-        className="max-w-[7.5rem] appearance-none truncate rounded-lg border border-line bg-surface py-1.5 pr-6 pl-2.5 font-medium text-ink outline-none focus:border-brand disabled:cursor-not-allowed disabled:opacity-60 sm:max-w-[9rem]"
+        className="max-w-[7.5rem] appearance-none truncate rounded-chip border border-line bg-surface py-1.5 pr-6 pl-2.5 font-medium text-ink shadow-card outline-none transition-colors hover:border-line-strong focus:border-brand disabled:cursor-not-allowed disabled:opacity-60 sm:max-w-[9rem]"
       >
         {value && !options.some((option) => option.value === value) ? <option value={value}>{value}</option> : null}
         {options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}

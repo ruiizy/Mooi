@@ -6,10 +6,12 @@ interface SegmentedControlProps {
   value: string;
   onChange: (id: string) => void;
   className?: string;
+  /** Id of the element naming the group. */
+  labelledBy?: string;
 }
 
-export const SegmentedControl = ({ items, value, onChange, className }: SegmentedControlProps) => (
-  <div role="group" className={cn('inline-flex flex-wrap gap-1 rounded-[10px] bg-surface-2 p-1', className)}>
+export const SegmentedControl = ({ items, value, onChange, className, labelledBy }: SegmentedControlProps) => (
+  <div role="group" aria-labelledby={labelledBy} className={cn('inline-flex flex-wrap gap-1 rounded-control border border-line bg-surface-2 p-0.5', className)}>
     {items.map((item) => {
       const Icon = item.icon;
       const isActive = item.id === value;
@@ -21,8 +23,8 @@ export const SegmentedControl = ({ items, value, onChange, className }: Segmente
           aria-pressed={isActive}
           onClick={() => onChange(item.id)}
           className={cn(
-            'inline-flex min-h-10 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-lg px-3 text-[13px] font-bold transition duration-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand',
-            isActive ? 'bg-surface text-ink ring-1 ring-line' : 'text-ink-muted hover:text-ink',
+            'inline-flex min-h-9 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-[7px] px-3 text-[13px] font-medium transition-[background-color,color,box-shadow] duration-150 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand',
+            isActive ? 'bg-surface text-ink shadow-raised ring-1 ring-line' : 'text-ink-muted hover:text-ink',
           )}
         >
           {Icon ? <Icon className="size-4" /> : null}

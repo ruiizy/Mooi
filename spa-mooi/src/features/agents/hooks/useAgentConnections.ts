@@ -5,7 +5,6 @@ import {
   fetchAgentConnections,
   renameAgentConnection,
   selectDefaultAccount,
-  startAgentAuthorization,
 } from '@/features/agents/api/agentsApi';
 import type { AgentConnection } from '@/features/agents/types/AgentConnection';
 import type { AgentProvider } from '@/features/agents/types/AgentProvider';
@@ -19,7 +18,6 @@ interface UseAgentConnections {
   error: string | null;
   busy: boolean;
   actionError: string | null;
-  startOauth: (provider: string, name: string) => void;
   connectToken: (provider: string, token: string, name: string) => Promise<boolean>;
   disconnect: (id: string) => Promise<boolean>;
   rename: (id: string, name: string) => Promise<boolean>;
@@ -42,26 +40,6 @@ export const useAgentConnections = (): UseAgentConnections => {
   const error = useAgentsStore((state) => state.error);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-
-  /**
-   * Leaves the application on purpose: the authorization happens on the provider's own site, and
-   * the callback comes back to a route of ours that finishes the exchange (E4).
-   */
-  const startOauth = useCallback((provider: string, name: string) => {
-    setBusy(true);
-    setActionError(null);
-    startAgentAuthorization(provider)
-      .then((authorization) => {
-        const state = new URL(authorization.authorizeUrl).searchParams.get('state');
-        if (!state) throw new Error('Could not start the authorization.');
-        sessionStorage.setItem(`agent-oauth-name:${state}`, name.trim());
-        window.location.assign(authorization.authorizeUrl);
-      })
-      .catch((failure: Error) => {
-        setBusy(false);
-        setActionError(failure.message);
-      });
-  }, []);
 
   const connectToken = useCallback(async (provider: string, token: string, name: string): Promise<boolean> => {
     setBusy(true);
@@ -148,7 +126,6 @@ export const useAgentConnections = (): UseAgentConnections => {
     error,
     busy,
     actionError,
-    startOauth,
     connectToken,
     disconnect,
     rename,

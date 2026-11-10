@@ -64,21 +64,29 @@ export const RepositoryPicker = ({
     );
   }, [query, repositories]);
 
+  // A token that reaches private repositories on its own (classic OAuth or personal access token)
+  // needs no installation: only a public-only list means Mooi was never let in.
+  const publicOnly = installations === 0 && !repositories.some((repository) => repository.isPrivate);
+
   return (
     <>
       {/* Zero installations is the difference between "you own nothing else" and "Mooi was never
           let in" — without saying so, a list missing every private repository looks like a bug. */}
-      {!loading && !failure && installations === 0 ? (
-        <div className="mb-4 flex flex-col gap-3 rounded-[10px] border border-warning/25 bg-warning-soft px-4 py-3 sm:flex-row sm:items-center">
+      {!loading && !failure && publicOnly ? (
+        <div className="mb-4 flex flex-col gap-3 rounded-control border border-warning/25 bg-warning-soft px-4 py-3 sm:flex-row sm:items-center">
           <p className="min-w-0 flex-1 text-sm leading-relaxed text-ink">
-            <span className="font-medium">Only public repositories are listed.</span>
+            <span className="font-medium">
+              {repositories.length === 0
+                ? 'Mooi cannot reach your repositories yet.'
+                : 'Only public repositories are listed.'}
+            </span>
             <span className="text-ink-muted">
-              {' '}Mooi has not been granted access to any repository on GitHub yet.
+              {' '}Install the Mooi GitHub App on the repositories you want to work on, then reload.
             </span>
           </p>
           <span className="shrink-0">
             <Button variant="primary" size="sm" onClick={onManageAccess}>
-              Manage access
+              Grant access
             </Button>
           </span>
         </div>

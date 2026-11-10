@@ -33,7 +33,7 @@ export const CopyButton = ({ value, label, className }: CopyButtonProps) => {
       aria-label={label}
       title={label}
       className={cn(
-        'inline-flex size-8 shrink-0 items-center justify-center rounded-[8px] transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand',
+        'inline-flex size-8 shrink-0 items-center justify-center rounded-chip transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand',
         copied ? 'text-success' : 'text-ink-subtle hover:bg-surface-3 hover:text-ink',
         className,
       )}

@@ -32,11 +32,11 @@ export const BackupRestoreDialog = ({ backup, projectName, busy, error, onClose,
       <li>{backup.verifiedAt ? `It was last verified in a disposable instance ${formatRelativeTime(backup.verifiedAt)}.`
         : 'It has not been verified yet: verifying it first in a disposable instance is safer.'}</li>
     </ul>
-    <label className="mt-5 flex cursor-pointer items-start gap-3 rounded-[12px] border border-line bg-surface-2 p-3.5 text-sm text-ink">
+    <label className="mt-5 flex cursor-pointer items-start gap-3 rounded-xl border border-line bg-surface-2 p-3.5 text-sm text-ink">
       <input type="checkbox" checked={understood} onChange={(event) => setUnderstood(event.target.checked)} disabled={busy}
         className="mt-0.5 size-4 accent-danger" />
       <span>I understand production data will be replaced by this backup.</span>
     </label>
-    {error ? <p role="alert" className="mt-4 rounded-[10px] border border-danger/30 bg-danger-soft px-4 py-2.5 text-sm text-danger">{error}</p> : null}
+    {error ? <p role="alert" className="mt-4 rounded-control border border-danger/30 bg-danger-soft px-4 py-2.5 text-sm text-danger">{error}</p> : null}
   </Modal>;
 };

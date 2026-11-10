@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom';
 import { ROUTES } from '@/app/routes';
 import { AgentAccountSelect } from '@/features/agents/components/AgentAccountSelect';
+import { AgentAdapterSelect } from '@/features/sessions/components/AgentAdapterSelect';
 import { SessionModelFields } from '@/features/sessions/components/SessionModelFields';
 import type { AgentModelChoice } from '@/features/sessions/hooks/useAgentModelChoice';
 
@@ -10,13 +11,14 @@ interface AgentModelFieldsProps {
   onLeave: () => void;
 }
 
-/** Agent account, model and effort pickers, or the way to add an account when there is none. */
+/** Agent account, adapter, model and effort pickers, or the way to add an account when there is none. */
 export const AgentModelFields = ({ choice, onLeave }: AgentModelFieldsProps) => {
-  const { connections, connectionId, setConnectionId, selectedProvider, model, effort, selectModel, setEffort, catalogError } = choice;
+  const { connections, connectionId, setConnectionId, adapters, adapter, setAdapter, selectedProvider, model, effort,
+    selectModel, setEffort, catalogError } = choice;
 
   if (connections.length === 0) {
     return (
-      <div className="rounded-[10px] border border-warning/30 bg-warning-soft px-4 py-3.5 text-sm leading-relaxed text-ink">
+      <div className="rounded-control border border-warning/30 bg-warning-soft px-4 py-3.5 text-sm leading-relaxed text-ink">
         <p>
           <span className="font-medium">Add an agent account first.</span>{' '}
           <span className="text-ink-muted">A session needs one to run.</span>
@@ -38,6 +40,8 @@ export const AgentModelFields = ({ choice, onLeave }: AgentModelFieldsProps) => 
         <span className="text-xs font-medium text-ink-muted">Agent account</span>
         <AgentAccountSelect connections={connections} value={connectionId} onChange={setConnectionId} />
       </label>
+
+      {adapters.length > 1 && <AgentAdapterSelect adapters={adapters} value={adapter} onChange={setAdapter} />}
 
       <SessionModelFields provider={selectedProvider} model={model} effort={effort}
         onModelChange={selectModel} onEffortChange={setEffort} />

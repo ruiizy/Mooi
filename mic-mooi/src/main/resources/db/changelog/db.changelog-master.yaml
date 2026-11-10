@@ -57,3 +57,13 @@ databaseChangeLog:
       file: db/changelog/changes/028-recipe-marketplaces.yaml
   - include:
       file: db/changelog/changes/029-agent-engine-defaults.yaml
+  - include:
+      file: db/changelog/changes/030-unfinished-operation-indexes.yaml
+  - include:
+      file: db/changelog/changes/031-project-development-deployment.yaml
+  - include:
+      file: db/changelog/changes/032-player-bans.yaml
+  - include:
+      file: db/changelog/changes/033-agent-engine-default-adapter.yaml
+  - include:
+      file: db/changelog/changes/034-refresh-token-rotation-chain.yaml

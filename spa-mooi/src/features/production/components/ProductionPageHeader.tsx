@@ -43,7 +43,7 @@ export const ProductionPageHeader = ({ project, stage, configured, healthState, 
     <div className="shrink-0 border-b border-line bg-surface">
       <div className="flex items-center gap-1.5 py-2 pr-2 pl-1.5 sm:gap-3 sm:px-5 sm:py-2.5">
         <Link to={ROUTES.deployments} aria-label="Back to deployments" title="Back to deployments"
-          className="flex size-10 shrink-0 items-center justify-center rounded-[10px] text-ink-muted transition hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand">
+          className="flex size-10 shrink-0 items-center justify-center rounded-control text-ink-muted transition hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand">
           <ChevronLeft className="size-4.5" />
         </Link>
 

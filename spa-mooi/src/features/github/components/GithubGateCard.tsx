@@ -16,7 +16,7 @@ interface GithubGateCardProps {
  * available.
  */
 export const GithubGateCard = ({ title, description }: GithubGateCardProps) => {
-  const { status, connect } = useGithubConnection();
+  const { status, error, connect } = useGithubConnection();
 
   return (
     <Card className="relative overflow-hidden p-8 text-center sm:p-12">
@@ -38,6 +38,11 @@ export const GithubGateCard = ({ title, description }: GithubGateCardProps) => {
         <div className="mt-7">
           <GithubConnectButton onConnect={connect} busy={status === 'connecting'} />
         </div>
+        {status === 'error' && error ? (
+          <p role="alert" className="mt-4 rounded-control border border-danger/30 bg-danger-soft px-4 py-2.5 text-sm text-danger">
+            {error}
+          </p>
+        ) : null}
       </div>
     </Card>
   );

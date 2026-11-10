@@ -1,1 +1,1 @@
-export type WorkspacePane = 'conversation' | 'changes' | 'preview';
+export type WorkspacePane = 'conversation' | 'changes' | 'files' | 'preview' | 'trace';

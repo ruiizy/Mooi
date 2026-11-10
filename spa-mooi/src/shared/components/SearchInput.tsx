@@ -11,7 +11,7 @@ interface SearchInputProps {
 export const SearchInput = ({ value, onChange, placeholder, className }: SearchInputProps) => (
   <div
     className={cn(
-      'flex h-11 w-full items-center gap-2.5 rounded-[10px] bg-surface-2 px-3.5 transition focus-within:bg-surface focus-within:ring-2 focus-within:ring-ink',
+      'flex h-10 w-full items-center gap-2.5 rounded-control border border-line bg-surface px-3 shadow-card transition-[border-color,box-shadow] duration-150 hover:border-line-strong focus-within:border-brand/60 focus-within:ring-4 focus-within:ring-brand/12',
       className,
     )}
   >

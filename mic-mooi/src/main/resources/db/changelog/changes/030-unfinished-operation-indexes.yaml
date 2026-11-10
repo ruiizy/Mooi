@@ -1,0 +1,17 @@
+databaseChangeLog:
+  - changeSet:
+      id: 030-unfinished-operation-indexes
+      author: mooi
+      comment: Reconciliation looks up only unfinished runs; partial indexes keep that lookup tiny as history grows.
+      changes:
+        - sql:
+            sql: >-
+              CREATE INDEX idx_production_deployments_unfinished ON production_deployments (started_at)
+              WHERE finished_at IS NULL;
+              CREATE INDEX idx_backup_operations_unfinished ON backup_operations (started_at)
+              WHERE finished_at IS NULL;
+      rollback:
+        - sql:
+            sql: >-
+              DROP INDEX idx_production_deployments_unfinished;
+              DROP INDEX idx_backup_operations_unfinished;

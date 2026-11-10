@@ -20,7 +20,7 @@ export const RecipeMarketplacesCard = () => {
     <Card className="p-5 sm:p-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 className="text-sm font-extrabold tracking-[-0.02em] text-ink">Recipe marketplaces</h2>
+          <h2 className="text-sm font-semibold tracking-[-0.015em] text-ink">Recipe marketplaces</h2>
           <p className="mt-1 text-xs text-ink-subtle">GitHub repositories of reusable recipes your sessions can apply.</p>
         </div>
         <Button variant="secondary" size="sm" disabled={busy} onClick={() => { clearActionError(); setAdding(true); }}>

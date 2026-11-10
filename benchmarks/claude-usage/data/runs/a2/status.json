@@ -1,0 +1,12 @@
+{
+ "condition": "claude-code",
+ "state": "done",
+ "launched": 1794256560.060151,
+ "cwd": "/Users/mydherin/projects/mydherin/Mooi/tmp/usage-benchmark/work/a2",
+ "folder": "/Users/mydherin/.claude/projects/-Users-mydherin-projects-mydherin-Mooi-tmp-usage-benchmark-work-a2",
+ "pid": 19380,
+ "updated": 1794256815.956846,
+ "finished": 1794256740.892815,
+ "session": "ae77e1de-ceab-4040-ad30-f2b91da41427",
+ "done": 1794256815.955919
+}

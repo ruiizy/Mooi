@@ -40,7 +40,7 @@ export const DeploymentSetupDialog = ({ busy, error, onClose, onSubmit }: Deploy
     <div className="flex flex-col gap-4">
       <label className="flex flex-col gap-2">
         <span className="text-xs font-medium text-ink-muted">What should change?</span>
-        <div className="rounded-[12px] border border-line bg-surface-2 transition focus-within:border-brand/50">
+        <div className="rounded-xl border border-line bg-surface-2 transition focus-within:border-brand/50">
           <textarea autoFocus rows={5} value={instructions} disabled={busy} onChange={(event) => setInstructions(event.target.value)}
             onKeyDown={onKeyDown} maxLength={20000}
             placeholder="For example: add a worker service, expose the admin panel instead of the landing page, use Postgres 17…"
@@ -57,7 +57,7 @@ export const DeploymentSetupDialog = ({ busy, error, onClose, onSubmit }: Deploy
           </button>)}
         </div> : null}
       </label>
-      {error ? <p role="alert" className="rounded-[10px] border border-danger/30 bg-danger-soft px-4 py-2.5 text-sm text-danger">{error}</p> : null}
+      {error ? <p role="alert" className="rounded-control border border-danger/30 bg-danger-soft px-4 py-2.5 text-sm text-danger">{error}</p> : null}
     </div>
   </Modal>;
 };

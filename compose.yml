@@ -3,12 +3,14 @@
 # their assigned COMPOSE_PROJECT_NAME; resource names and host ports are generated per project.
 #
 #   /preview/<id>/  -> spa-mooi nginx: SPA + /api/mooi -> mic-mooi + /api/sessions -> mic-sessions
+#                      + /api/stt -> mic-speech (by service name; production uses loopback)
 #
 # Fully disjoint from production: own database, volumes, secrets (MOOI_DEVELOPMENT_*), browser storage
 # prefix and same-origin API routes under MOOI_PREVIEW_BASE_PATH. Mooi renames the project, volumes,
 # networks and images per session and drops every published port but the SPA one. Google sign-in is mocked unless
 # MOOI_DEVELOPMENT_GOOGLE_AUTH_MOCK=false; GitHub, Claude and Codex accounts are linked from MOOI_DEVELOPMENT_*.
-# Left out: dictation (mic-speech, a ~742 MB local model) and nested deployments (no Docker engine inside).
+# Dictation downloads its ~742 MB model into the speech-data volume on the first deploy only.
+# Left out: nested deployments (no Docker engine inside).
 
 services:
   postgres:
@@ -96,12 +98,37 @@ services:
         VITE_AUTH_GOOGLE_MOCK: ${MOOI_DEVELOPMENT_GOOGLE_AUTH_MOCK:-true}
         # Previews share Mooi's origin: never read or overwrite production's browser storage.
         VITE_STORAGE_PREFIX: mooi-preview${MOOI_PREVIEW_BASE_PATH:-/}
+        SPEECH_UPSTREAM: mic-speech:59100
     ports:
       - "80"
     depends_on:
       - mic-mooi
       - mic-sessions
 
+  # Production shares the gateway's network namespace (loopback only); Mooi previews cannot, so here
+  # uvicorn listens on the session's private network and nginx reaches it by service name
+  # (SPEECH_UPSTREAM). Same command as the image otherwise; its healthcheck covers the first model download.
+  # Its data lives in the image's home, so the volume is created owned by the `mooi` user (no init step).
+  mic-speech:
+    build:
+      context: ./mic-speech
+      dockerfile: Dockerfile
+    # Literal paths and port: no `$` survives Mooi's re-rendering of the Compose file.
+    command: ["sh", "-c", "mkdir -p /home/mooi/speech/home && python -m mic_speech.shared.engine provision && exec uvicorn mic_speech.main:app --host 0.0.0.0 --port 59100 --ws-max-size 16000 --ws-max-queue 8 --timeout-graceful-shutdown 5"]
+    environment:
+      CORS_ORIGIN: ${MOOI_DEVELOPMENT_PUBLIC_ORIGIN}
+      SPEECH_LANGUAGE: es-ES
+      SPEECH_MAX_SECONDS: "300"
+      SPEECH_STARTUP_TIMEOUT_SECONDS: "120"
+      LOG_LEVEL: INFO
+      NEMO_SPEECH_MODEL_DIR: /home/mooi/speech/models
+      SPEECH_METRICS_PATH: /home/mooi/speech/metrics.sqlite
+      XDG_CACHE_HOME: /home/mooi/speech/cache
+      HOME: /home/mooi/speech/home
+    volumes:
+      - speech-data:/home/mooi
+
 volumes:
   postgres-data:
   sessions-home:
+  speech-data:

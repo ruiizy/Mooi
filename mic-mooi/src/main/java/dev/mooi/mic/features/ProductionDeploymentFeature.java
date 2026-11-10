@@ -1,7 +1,9 @@
 package dev.mooi.mic.features;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 import org.springframework.data.domain.PageRequest;
@@ -30,6 +32,7 @@ import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
@@ -78,12 +81,19 @@ public class ProductionDeploymentFeature {
         return service.start(projectId, principal.player().id(), body);
     }
 
-    @PutMapping("/me/projects/{projectId}/production/deployments/{operationId}")
-    @Auth.Authenticated
-    @Auth.ServiceCall
+    /** Service-only: a deployment may outlive the access token of the player who started it. */
+    @PutMapping("/internal/projects/{projectId}/production/deployments/{operationId}")
+    @Auth.ServiceOnly
     public DeploymentPayload finish(@PathVariable UUID projectId, @PathVariable UUID operationId,
-                                    @Valid @RequestBody FinishDeployment body, Auth.Principal principal) {
-        return service.finish(projectId, principal.player().id(), operationId, body);
+                                    @Valid @RequestBody FinishDeployment body) {
+        return service.finish(projectId, operationId, body);
+    }
+
+    /** The runner names the deployments it still runs; every other unfinished one was orphaned by a restart. */
+    @PostMapping("/internal/production/deployments/reconcile")
+    @Auth.ServiceOnly
+    public Reconciled reconcile(@Valid @RequestBody ReconcileDeployments body) {
+        return new Reconciled(service.interruptOrphans(Set.copyOf(body.active())));
     }
 
     public record DeploymentFiles(@NotBlank @Size(max = 65536) String manifest,
@@ -95,6 +105,8 @@ public class ProductionDeploymentFeature {
                                    @Size(max = 2000) List<String> logs) { }
     public record DeploymentPayload(UUID operationId, UUID projectId, UUID sessionId, String releaseTag,
                                     String state, Instant startedAt, Instant finishedAt) { }
+    public record ReconcileDeployments(@NotNull @Size(max = 1000) List<@NotNull UUID> active) { }
+    public record Reconciled(int interrupted) { }
     public record DeploymentPage(List<DeploymentPayload> deployments, boolean hasMore) { }
     public record DeploymentDetail(DeploymentPayload deployment, DeploymentFiles files,
                                    String message, List<String> logs) { }
@@ -102,6 +114,10 @@ public class ProductionDeploymentFeature {
     @Service
     @RequiredArgsConstructor
     public static class DeploymentService {
+        /** A run this recent may still be starting while the runner names its active ones: the next sweep sees it. */
+        private static final Duration SETTLING = Duration.ofMinutes(1);
+        private static final String INTERRUPTED = "Production deployment interrupted: its runner stopped before it finished";
+
         private final DeploymentRepository deployments;
         private final DeploymentFilesRepository files;
         private final ProjectRepository projects;
@@ -195,26 +211,34 @@ public class ProductionDeploymentFeature {
         }
 
         @Transactional
-        public DeploymentPayload finish(UUID projectId, UUID playerId, UUID operationId, FinishDeployment input) {
-            requireProject(projectId, playerId);
+        public DeploymentPayload finish(UUID projectId, UUID operationId, FinishDeployment input) {
             if (!input.state().equals("succeeded") && !input.state().equals("failed")) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid deployment state");
             }
-            var row = deployments.findById(operationId).orElseThrow(() ->
-                    new ResponseStatusException(HttpStatus.NOT_FOUND, "Deployment not found"));
-            if (!row.getPlayerId().equals(playerId) || !row.getProjectId().equals(projectId)) {
-                throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Deployment not found");
-            }
-            if (row.getFinishedAt() == null) {
-                row.setState(input.state());
-                row.setFinishedAt(Instant.now());
-                files.findById(operationId).ifPresent(saved -> {
-                    saved.setResultMessage(input.message() == null ? null : box.encrypt(input.message()));
-                    saved.setResultLogs(input.logs() == null || input.logs().isEmpty() ? null
-                            : box.encrypt(String.join("\n", input.logs())));
-                });
-            }
+            var row = deployments.findById(operationId).filter(found -> found.getProjectId().equals(projectId))
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Deployment not found"));
+            conclude(row, input.state(), input.message(), input.logs());
             return payload(row);
+        }
+
+        /** Fails every unfinished deployment outside `active`; answers how many it failed. */
+        @Transactional
+        public int interruptOrphans(Set<UUID> active) {
+            var orphans = deployments.findByFinishedAtIsNullAndStartedAtBefore(Instant.now().minus(SETTLING))
+                    .stream().filter(row -> !active.contains(row.getOperationId())).toList();
+            orphans.forEach(row -> conclude(row, "failed", INTERRUPTED, null));
+            return orphans.size();
+        }
+
+        /** The first outcome wins: a later finish or reconcile never rewrites a concluded deployment. */
+        private void conclude(Deployment row, String state, String message, List<String> logs) {
+            if (row.getFinishedAt() != null) return;
+            row.setState(state);
+            row.setFinishedAt(Instant.now());
+            files.findById(row.getOperationId()).ifPresent(saved -> {
+                saved.setResultMessage(message == null ? null : box.encrypt(message));
+                saved.setResultLogs(logs == null || logs.isEmpty() ? null : box.encrypt(String.join("\n", logs)));
+            });
         }
 
         private DeploymentPayload payload(Deployment row) {
@@ -260,6 +284,7 @@ public class ProductionDeploymentFeature {
     public interface DeploymentRepository extends JpaRepository<Deployment, UUID> {
         Page<Deployment> findByPlayerIdOrderByStartedAtDesc(UUID playerId, Pageable pageable);
         Page<Deployment> findByProjectIdAndPlayerIdOrderByStartedAtDesc(UUID projectId, UUID playerId, Pageable pageable);
+        List<Deployment> findByFinishedAtIsNullAndStartedAtBefore(Instant cutoff);
     }
     public interface DeploymentFilesRepository extends JpaRepository<DeploymentFileSnapshot, UUID> { }
     public interface ProjectRepository extends JpaRepository<ProjectReference, UUID> {

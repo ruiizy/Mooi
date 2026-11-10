@@ -70,7 +70,7 @@ export const QuestionCard = ({ request, busy, onAnswer }: QuestionCardProps) => 
   };
 
   return (
-    <div className="rounded-[14px] border border-info/30 bg-info-soft/60 px-4 py-3.5">
+    <div className="rounded-card border border-info/30 bg-info-soft/60 px-4 py-3.5">
       <div className="flex items-start gap-2.5">
         <CircleHelp className="mt-0.5 size-4 shrink-0 text-info" />
         <p className="text-sm font-medium text-ink">The agent needs more information</p>

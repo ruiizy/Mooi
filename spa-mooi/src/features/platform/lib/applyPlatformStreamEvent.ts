@@ -10,8 +10,8 @@ export const applyPlatformSnapshot = <S extends PlatformSnapshot>(state: Platfor
 });
 
 /**
- * The single fold over a platform stream (`<prefix>.sync|updated|log`): sync replaces, updates adopt,
- * output of the current operation appends. Configuration events leave the state untouched.
+ * The single fold over one project's operation events (`<prefix>.sync|updated|log`): sync replaces,
+ * updates adopt, output of the current operation appends. Other events leave the state untouched.
  */
 export const applyPlatformStreamEvent = <S extends PlatformSnapshot>(prefix: string, state: PlatformStreamState<S>,
   frame: StreamFrame): PlatformStreamState<S> => {
@@ -20,7 +20,7 @@ export const applyPlatformStreamEvent = <S extends PlatformSnapshot>(prefix: str
     case `${prefix}.sync`:
       return { snapshot: data.snapshot as S, logs: data.logs as string[] };
     case `${prefix}.updated`:
-      return applyPlatformSnapshot(state, data as unknown as S);
+      return applyPlatformSnapshot(state, data.snapshot as S);
     case `${prefix}.log`:
       return data.operationId === state.snapshot?.operationId
         ? { ...state, logs: [...state.logs, ...(data.lines as string[])].slice(-PLATFORM_LOG_LIMIT) } : state;

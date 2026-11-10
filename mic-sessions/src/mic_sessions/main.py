@@ -1,8 +1,8 @@
 """ASGI entrypoint: assembles the app from the transversal aspects and features.
 
 The sessions feature owns its own router; `session_count` is registered here for `/health` to read.
-`_lifespan` starts the sessions feature's idle reaper on boot and closes every live session
-(workspace + runtime) on graceful shutdown — the feature exports `start_reaper()`/`close_all()`;
+`_lifespan` starts the sessions feature's reconciler on boot and closes every live session
+(workspace + runtime) on graceful shutdown — the feature exports `start_reconciler()`/`close_all()`;
 this module only calls them. The preview gateway wraps the whole API: requests for a preview
 path go to the embedded reverse proxy before any API middleware runs.
 """
@@ -29,7 +29,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     if preserved is not None:
         await workspaces.get_workspaces().reconcile(preserve=preserved)
     await web.open_http_client()
-    sessions.start_reaper()
+    sessions.start_reconciler()
     try:
         yield
     finally:

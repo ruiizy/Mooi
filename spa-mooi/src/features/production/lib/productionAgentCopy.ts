@@ -29,4 +29,5 @@ export const PRODUCTION_AGENT_SUGGESTIONS = [
   'Docker Compose on my server over SSH',
   'Static build published to GitHub Pages',
   'Container image deployed to Fly.io',
+  'Cloud Run on GCP with Cloud SQL',
 ];

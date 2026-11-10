@@ -33,6 +33,8 @@ class Caller:
     session_id: UUID
     role: str
     token: str
+    # Epoch seconds: lets whoever keeps a caller beyond its request renew the token in time.
+    expires_at: float
 
 
 def verify_access_token(token: str) -> Caller:
@@ -45,6 +47,7 @@ def verify_access_token(token: str) -> Caller:
             session_id=UUID(str(claims["sid"])),
             role=str(claims["role"]),
             token=token,
+            expires_at=float(claims["exp"]),
         )
     except (jwt.PyJWTError, KeyError, ValueError):
         raise ApiException.unauthorized(_UNAUTHORIZED_MESSAGE) from None

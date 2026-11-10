@@ -40,7 +40,7 @@ export const BackupOverviewPanel = ({ project, overview, error, onRetry, stage, 
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto flex w-full max-w-6xl flex-col gap-5 px-4 py-6 sm:px-8 lg:px-10 lg:py-8">
-        {error ? <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-[12px] border border-danger/30 bg-danger-soft px-4 py-3 text-sm text-danger">
+        {error ? <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-danger/30 bg-danger-soft px-4 py-3 text-sm text-danger">
           <span className="min-w-0 flex-1">{error}</span>
           {!overview ? <Button variant="secondary" size="sm" onClick={onRetry}>Retry</Button> : null}
         </div> : null}

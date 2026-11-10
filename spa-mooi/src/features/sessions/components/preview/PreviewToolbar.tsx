@@ -17,7 +17,7 @@ export const PreviewToolbar = ({ device, onDeviceChange, onReload, children }: P
       {([{ id: 'desktop', label: 'Desktop (1920 × 1080)', icon: Monitor }, { id: 'mobile', label: 'Mobile (390 px wide)', icon: Smartphone }] as const).map(({ id, label, icon: Icon }) => (
         <button key={id} type="button" aria-label={label} title={label} aria-pressed={device === id}
           onClick={() => onDeviceChange(id)}
-          className={cn('inline-flex size-11 items-center justify-center rounded-[10px] focus-visible:outline-2 focus-visible:outline-brand', device === id ? 'bg-surface-2 text-ink' : 'text-ink-muted hover:bg-surface-2')}>
+          className={cn('inline-flex size-11 items-center justify-center rounded-control focus-visible:outline-2 focus-visible:outline-brand', device === id ? 'bg-surface-2 text-ink' : 'text-ink-muted hover:bg-surface-2')}>
           <Icon className="size-4.5" />
         </button>
       ))}

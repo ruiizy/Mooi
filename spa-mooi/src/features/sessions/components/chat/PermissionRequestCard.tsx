@@ -46,7 +46,7 @@ export const PermissionRequestCard = ({ request, editable, busy, onAllow, onDeny
   }
 
   return (
-    <div className="rounded-[14px] border border-warning/30 bg-warning-soft/60 px-4 py-3.5">
+    <div className="rounded-card border border-warning/30 bg-warning-soft/60 px-4 py-3.5">
       <div className="flex items-start gap-2.5">
         <ShieldAlert className="mt-0.5 size-4 shrink-0 text-warning" />
         <div className="min-w-0 flex-1">

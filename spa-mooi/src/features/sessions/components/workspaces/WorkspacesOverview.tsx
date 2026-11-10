@@ -52,7 +52,7 @@ export const WorkspacesOverview = ({ projectId, previewsEnabled, overview, loadi
           type="button"
           onClick={onReload}
           disabled={loading}
-          className="inline-flex items-center gap-1.5 self-start rounded-[10px] border border-line px-3 py-1.5 text-xs font-bold text-ink-muted transition hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand disabled:opacity-60 sm:self-auto"
+          className="inline-flex items-center gap-1.5 self-start rounded-control border border-line px-3 py-1.5 text-xs font-bold text-ink-muted transition hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand disabled:opacity-60 sm:self-auto"
         >
           <RefreshCw className={cn('size-3.5', loading && 'animate-spin')} />
           Refresh

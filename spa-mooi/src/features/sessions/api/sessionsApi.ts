@@ -7,6 +7,8 @@ import type { AsideFrame } from '@/features/sessions/types/AsideFrame';
 import type { ChangesSummary } from '@/features/sessions/types/ChangesSummary';
 import type { CreateSessionRequest } from '@/features/sessions/types/CreateSessionRequest';
 import type { FileDiffPayload } from '@/features/sessions/types/FileDiffPayload';
+import type { SessionFileContent } from '@/features/sessions/types/SessionFileContent';
+import type { SessionFiles } from '@/features/sessions/types/SessionFiles';
 import type { ImageUpload } from '@/features/sessions/types/ImageUpload';
 import type { MergeResult } from '@/features/sessions/types/MergeResult';
 import type { SendMessageResponse } from '@/features/sessions/types/SendMessageResponse';
@@ -33,6 +35,9 @@ const questionPath = (sessionId: string, requestId: string) => `/sessions/${sess
 const changesPath = (sessionId: string) => `/sessions/${sessionId}/changes`;
 const fileDiffPath = (sessionId: string, path: string) =>
   `/sessions/${sessionId}/changes/file?path=${encodeURIComponent(path)}`;
+const filesPath = (sessionId: string) => `/sessions/${sessionId}/files`;
+const fileContentPath = (sessionId: string, path?: string) =>
+  `/sessions/${sessionId}/files/content${path === undefined ? '' : `?path=${encodeURIComponent(path)}`}`;
 
 const jsonHeaders = { 'Content-Type': 'application/json' };
 
@@ -127,8 +132,11 @@ export const recoverSession = async (sessionId: string): Promise<void> => {
   if (!response.ok) throw new Error(await apiErrorMessage(response, 'Could not reconnect the agent.'));
 };
 
-export const compactSession = async (sessionId: string): Promise<void> => {
-  const response = await sessionsFetch(compactPath(sessionId), { method: 'POST' });
+export const compactSession = async (sessionId: string, instructions?: string): Promise<void> => {
+  const response = await sessionsFetch(compactPath(sessionId), {
+    method: 'POST',
+    ...(instructions ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ instructions }) } : {}),
+  });
   if (!response.ok) throw new Error(await apiErrorMessage(response, 'Could not compact the conversation.'));
 };
 
@@ -215,8 +223,36 @@ export const fetchFileDiff = async (sessionId: string, path: string): Promise<Fi
   return (await response.json()) as FileDiffPayload;
 };
 
-export const fetchSessionProvider = async (provider: string, connectionId: string, refresh = false): Promise<SessionProvider> => {
-  const response = await sessionsFetch(`/sessions/providers/${encodeURIComponent(provider)}?connectionId=${encodeURIComponent(connectionId)}${refresh ? '&refresh=true' : ''}`);
+export const fetchSessionFiles = async (sessionId: string): Promise<SessionFiles> => {
+  const response = await sessionsFetch(filesPath(sessionId));
+  if (!response.ok) throw new Error(await apiErrorMessage(response, 'Could not load the files.'));
+  return (await response.json()) as SessionFiles;
+};
+
+export const fetchSessionFile = async (sessionId: string, path: string): Promise<SessionFileContent> => {
+  const response = await sessionsFetch(fileContentPath(sessionId, path));
+  if (!response.ok) throw new Error(await apiErrorMessage(response, 'Could not open this file.'));
+  return (await response.json()) as SessionFileContent;
+};
+
+export const saveSessionFile = async (
+  sessionId: string,
+  path: string,
+  content: string,
+  baseRevision: string,
+): Promise<SessionFileContent> => {
+  const response = await sessionsFetch(fileContentPath(sessionId), {
+    method: 'PUT',
+    headers: jsonHeaders,
+    body: JSON.stringify({ path, content, baseRevision }),
+  });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, 'Could not save this file.'));
+  return (await response.json()) as SessionFileContent;
+};
+
+export const fetchSessionProvider = async (provider: string, connectionId: string, refresh = false,
+  adapter?: string): Promise<SessionProvider> => {
+  const response = await sessionsFetch(`/sessions/providers/${encodeURIComponent(provider)}?connectionId=${encodeURIComponent(connectionId)}${refresh ? '&refresh=true' : ''}${adapter ? `&adapter=${encodeURIComponent(adapter)}` : ''}`);
   if (!response.ok) throw new Error(await apiErrorMessage(response, 'Could not load session models.'));
   return (await response.json()) as SessionProvider;
 };
@@ -241,11 +277,6 @@ export const stopDeployment = async (sessionId: string): Promise<DeploymentSnaps
   const response = await sessionsFetch(`${sessionPath(sessionId)}/deployment/stop`, { method: 'POST' });
   if (!response.ok) throw new Error(await apiErrorMessage(response, 'Could not stop the deployment.'));
   return (await response.json()) as DeploymentSnapshot;
-};
-
-export const sendSessionActivity = async (sessionId: string, signal?: AbortSignal): Promise<void> => {
-  const response = await sessionsFetch(`${sessionPath(sessionId)}/activity`, { method: 'POST', signal });
-  if (!response.ok) throw new Error(await apiErrorMessage(response, 'Could not renew session activity.'));
 };
 
 export const fetchWorkspaces = async (projectId: string): Promise<WorkspaceOverview> => {

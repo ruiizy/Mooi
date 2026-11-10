@@ -27,7 +27,7 @@ export const TurnFooter = ({ result, showCost }: TurnFooterProps) => {
   }
 
   return (
-    <p className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-ink-subtle">
+    <p className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] text-ink-subtle">
       {duration ? (
         <span className="flex items-center gap-1">
           <Clock className="size-3.5" />

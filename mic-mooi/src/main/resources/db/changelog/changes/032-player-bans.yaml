@@ -1,0 +1,16 @@
+databaseChangeLog:
+  - changeSet:
+      id: 032-player-bans
+      author: mooi
+      changes:
+        - addColumn:
+            tableName: players
+            columns:
+              - column:
+                  name: banned_at
+                  type: timestamp with time zone
+                  remarks: Set by an administrator; a banned player cannot sign in and every session is refused
+      rollback:
+        - dropColumn:
+            tableName: players
+            columnName: banned_at

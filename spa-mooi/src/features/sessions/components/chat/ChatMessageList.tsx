@@ -3,6 +3,7 @@ import { ArrowDown, LoaderCircle, MessagesSquare } from 'lucide-react';
 import { ChatMessageItem } from './ChatMessageItem';
 import { PermissionRequestCard } from './PermissionRequestCard';
 import { QuestionCard } from './QuestionCard';
+import { WorkingStatus } from './WorkingStatus';
 import { isProviderPlaceholder } from '@/features/sessions/lib/isProviderPlaceholder';
 import type { AgentCapabilities } from '@/features/sessions/types/AgentCapabilities';
 import type { SessionPendingRequest } from '@/features/sessions/types/SessionPendingRequest';
@@ -45,6 +46,8 @@ export const ChatMessageList = ({
     (entry.streaming && working) || entry.result || entry.blocks.some((block) =>
       block.kind === 'step' || block.kind === 'subagent' || ((block.kind !== 'thinking' || capabilities.thinking) && block.text.trim() && !isProviderPlaceholder(block.text))));
   const hasStreamingAssistant = visibleEntries.some((entry) => entry.kind === 'assistant' && entry.streaming);
+  // A question or approval hands the turn to the user: the agent's activity block settles meanwhile.
+  const agentBusy = working && pending.length === 0;
 
   useEffect(() => {
     const list = listRef.current;
@@ -79,18 +82,19 @@ export const ChatMessageList = ({
         }}
         className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-6 sm:px-8 sm:py-8">
         <ul ref={contentRef} className="mx-auto w-full max-w-3xl space-y-7 sm:space-y-9">
-          {visibleEntries.length === 0 && pending.length === 0 ? <li className="flex min-h-48 flex-col items-center justify-center py-8 text-center sm:py-14">
-            <span className="flex size-14 items-center justify-center rounded-[14px] bg-surface-2 text-ink-muted">
+          {visibleEntries.length === 0 && pending.length === 0 ? <li className="relative isolate flex min-h-48 animate-fade-up flex-col items-center justify-center py-8 text-center sm:py-14">
+            <span className="relative flex size-14 items-center justify-center rounded-2xl border border-line bg-surface text-brand shadow-raised">
+              <span aria-hidden className="absolute -inset-6 -z-10 rounded-full bg-[radial-gradient(circle,var(--glow-a),transparent_70%)]" />
               {loading || working ? <LoaderCircle className="size-6 animate-spin" /> : <MessagesSquare className="size-6" />}
             </span>
-            <h2 className="mt-5 text-xl font-extrabold tracking-[-0.03em] text-ink">{loading ? 'Loading conversation…' : working ? 'Processing your message…' : 'What shall we build?'}</h2>
+            <h2 className="mt-6 text-xl font-semibold tracking-[-0.03em] text-ink">{loading ? 'Loading conversation…' : working ? 'Processing your message…' : 'What shall we build?'}</h2>
             <p className="mt-2 max-w-sm text-sm leading-relaxed text-ink-muted">{loading ? 'Restoring the messages in this session.' : 'Describe an idea, ask about your code, or work through a change together.'}</p>
           </li> : <>
-            {visibleEntries.map((entry) => <ChatMessageItem key={entry.id} sessionId={sessionId} entry={entry} providerLabel={providerLabel} capabilities={capabilities} working={working} />)}
-            {working && !hasStreamingAssistant && pending.length === 0 ? (
-              <li role="status" aria-live="polite" className="flex items-center gap-3 text-sm text-ink-muted">
-                <LoaderCircle className="size-4 shrink-0 animate-spin text-brand" aria-hidden="true" />
-                <span>Processing your message…</span>
+            {visibleEntries.map((entry) => <ChatMessageItem key={entry.id} sessionId={sessionId} entry={entry} providerLabel={providerLabel} capabilities={capabilities}
+              live={agentBusy && entry.kind === 'assistant' && entry.streaming} />)}
+            {agentBusy && !hasStreamingAssistant ? (
+              <li className="animate-fade-up sm:pl-11">
+                <WorkingStatus label="Thinking" />
               </li>
             ) : null}
             {pending.map((request) => (
@@ -111,7 +115,7 @@ export const ChatMessageList = ({
           </>}
         </ul>
       </div>
-      {showLatest ? <button type="button" onClick={latest} className="absolute bottom-3 left-1/2 flex min-h-11 -translate-x-1/2 items-center gap-2 rounded-full border border-line bg-surface px-4 text-sm font-medium text-ink shadow-lg"><ArrowDown className="size-4" />Latest messages</button> : null}
+      {showLatest ? <button type="button" onClick={latest} className="absolute bottom-3 left-1/2 flex min-h-10 -translate-x-1/2 animate-fade-up items-center gap-2 rounded-full border border-line bg-surface/90 px-4 text-[13px] font-medium text-ink shadow-pop backdrop-blur-md transition-transform hover:-translate-y-0.5 active:scale-95"><ArrowDown className="size-4" />Latest messages</button> : null}
     </div>
   );
 };

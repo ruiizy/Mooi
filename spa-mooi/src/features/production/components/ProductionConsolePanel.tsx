@@ -34,7 +34,7 @@ export const ProductionConsolePanel = ({ snapshot, logs, hasChat, onOpenChat, on
 
   if (!snapshot?.operationId || snapshot.state === 'idle') {
     return <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
-      <span className="flex size-11 items-center justify-center rounded-[10px] bg-surface-2 text-ink-subtle"><Terminal className="size-5" /></span>
+      <span className="flex size-11 items-center justify-center rounded-control bg-surface-2 text-ink-subtle"><Terminal className="size-5" /></span>
       <p className="text-sm font-bold text-ink">No deployment output yet</p>
       <p className="max-w-sm text-sm text-ink-muted">Start a deployment to follow deploy.sh live. Past output stays available in each deployment's detail.</p>
     </div>;

@@ -31,7 +31,7 @@ export const Tooltip = ({ content, children, className, focusable = false, place
       id={id}
       role="tooltip"
       className={cn(placement === 'top' ? 'bottom-full mb-1.5' : 'top-full mt-1.5', align === 'end' ? 'right-0' : 'left-0',
-        mono ? 'font-mono break-all' : 'font-sans font-semibold break-words whitespace-pre-line', "pointer-events-none invisible absolute z-50 w-max max-w-[min(32rem,calc(100vw-2rem))] translate-y-0.5 rounded-[8px] border border-line-strong bg-surface px-2.5 py-1.5 text-[11px] leading-snug text-ink opacity-0 shadow-[0_8px_24px_rgb(0_0_0/0.18)] dark:shadow-[0_8px_24px_rgb(0_0_0/0.6)] transition duration-150 group-hover/tooltip:visible group-hover/tooltip:translate-y-0 group-hover/tooltip:opacity-100 group-focus-visible/tooltip:visible group-focus-visible/tooltip:translate-y-0 group-focus-visible/tooltip:opacity-100")}
+        mono ? 'font-mono break-all' : 'font-sans font-semibold break-words whitespace-pre-line', "pointer-events-none invisible absolute z-50 w-max max-w-[min(32rem,calc(100vw-2rem))] translate-y-0.5 rounded-chip border border-line-strong bg-surface px-2.5 py-1.5 text-[11px] leading-snug text-ink opacity-0 shadow-pop transition duration-150 group-hover/tooltip:visible group-hover/tooltip:translate-y-0 group-hover/tooltip:opacity-100 group-focus-visible/tooltip:visible group-focus-visible/tooltip:translate-y-0 group-focus-visible/tooltip:opacity-100")}
     >
       {content}
     </span>

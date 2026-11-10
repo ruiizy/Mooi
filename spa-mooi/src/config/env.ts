@@ -12,7 +12,6 @@ export const env: AppEnv = {
   contactEmail: requireEnv(import.meta.env.VITE_CONTACT_EMAIL, 'VITE_CONTACT_EMAIL'),
   apiBaseUrl: requireEnv(import.meta.env.VITE_API_BASE_URL, 'VITE_API_BASE_URL'),
   sessionsBaseUrl: requireEnv(import.meta.env.VITE_SESSIONS_BASE_URL, 'VITE_SESSIONS_BASE_URL'),
-  sessionsRefreshMs: requirePositiveNumber(import.meta.env.VITE_SESSIONS_REFRESH_SECONDS, 'VITE_SESSIONS_REFRESH_SECONDS') * 1000,
   streamStaleMs: requirePositiveNumber(import.meta.env.VITE_STREAM_STALE_SECONDS, 'VITE_STREAM_STALE_SECONDS') * 1000,
   speechBaseUrl: requireEnv(import.meta.env.VITE_SPEECH_BASE_URL, 'VITE_SPEECH_BASE_URL'),
   googleClientId: requireEnv(import.meta.env.VITE_GOOGLE_CLIENT_ID, 'VITE_GOOGLE_CLIENT_ID'),

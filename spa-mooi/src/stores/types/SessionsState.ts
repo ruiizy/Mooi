@@ -11,12 +11,12 @@ export interface SessionsState {
   markPreviewOpened: (sessionId: string, operationId: string) => void;
   setPane: (sessionId: string, pane: import('@/features/sessions/types/WorkspacePane').WorkspacePane) => void;
   setDeploymentLogOpen: (sessionId: string, open: boolean) => void;
-  setSessions: (sessions: Session[]) => void;
-  /** Replaces the sessions in scope (one project, or every one) with a fresh server list, dropping the ones gone. */
-  /** `knownIds`: sessions in the store when the list was requested; only those may be dropped. */
-  syncSessions: (sessions: Session[], projectId?: string, knownIds?: ReadonlySet<string>) => void;
+  /** Replaces every session with a fresh server list; gone ones are dropped, or shown closed while watched. */
+  syncSessions: (sessions: Session[]) => void;
   upsertSession: (session: Session) => void;
   removeSession: (sessionId: string) => void;
+  /** A session closed on the server: dropped, or shown closed while its transcript is watched. */
+  retireSession: (sessionId: string) => void;
   ensureTranscript: (sessionId: string) => void;
   applyEvent: (sessionId: string, event: SessionEvent) => void;
   setStreamState: (sessionId: string, streamState: SessionStreamState) => void;

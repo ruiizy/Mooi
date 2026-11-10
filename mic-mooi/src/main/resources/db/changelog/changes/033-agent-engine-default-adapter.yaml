@@ -1,0 +1,16 @@
+databaseChangeLog:
+  - changeSet:
+      id: 033-agent-engine-default-adapter
+      author: mooi
+      changes:
+        - addColumn:
+            tableName: agent_engine_defaults
+            columns:
+              - column:
+                  name: session_adapter
+                  type: varchar(32)
+                  remarks: Adapter preselected for new chats of this provider; NULL is the provider's first adapter
+      rollback:
+        - dropColumn:
+            tableName: agent_engine_defaults
+            columnName: session_adapter

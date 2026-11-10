@@ -36,7 +36,7 @@ export const WorkspaceHeader = ({ project, session, back, deployEnabled, onClose
         to={back.to}
         aria-label={`Back to ${back.label}`}
         title={`Back to ${back.label}`}
-        className="flex size-10 shrink-0 items-center justify-center rounded-[10px] text-ink-muted transition hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand"
+        className="flex size-10 shrink-0 items-center justify-center rounded-control text-ink-muted transition hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand"
       >
         <ChevronLeft className="size-4.5" />
       </Link>
@@ -44,9 +44,9 @@ export const WorkspaceHeader = ({ project, session, back, deployEnabled, onClose
       <WorkspaceCompactTitle project={project} session={session} />
 
       <div className="min-w-0 flex-1 max-sm:hidden">
-        <p className="truncate text-[11px] font-bold text-ink-subtle">{project.name}</p>
+        <p className="truncate text-[11px] font-medium text-ink-subtle">{project.name}</p>
         <Tooltip content={session.branch} className="flex">
-          <h1 className="flex min-w-0 items-center gap-1.5 text-[16px] leading-[1.3] font-extrabold tracking-[-0.01em] text-ink">
+          <h1 className="flex min-w-0 items-center gap-1.5 text-[15px] leading-[1.3] font-semibold tracking-[-0.01em] text-ink">
             <GitBranch className="size-4 shrink-0 text-ink-subtle" />
             <span className="line-clamp-1 font-mono break-all">{session.branch}</span>
           </h1>

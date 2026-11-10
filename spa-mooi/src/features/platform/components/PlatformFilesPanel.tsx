@@ -85,7 +85,7 @@ export const PlatformFilesPanel = <F,>({ fields, documents, summary, loadError, 
   }
   if (documents && !listed.length) {
     return <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
-      <span className="flex size-11 items-center justify-center rounded-[10px] bg-surface-2 text-ink-subtle"><FileCode2 className="size-5" /></span>
+      <span className="flex size-11 items-center justify-center rounded-control bg-surface-2 text-ink-subtle"><FileCode2 className="size-5" /></span>
       <p className="text-sm font-bold text-ink">No platform files yet</p>
       <p className="max-w-sm text-sm text-ink-muted">{emptyDescription}</p>
     </div>;
@@ -104,7 +104,7 @@ export const PlatformFilesPanel = <F,>({ fields, documents, summary, loadError, 
           const pending = !text(current, document.key).trim();
           const Icon = pending ? FileClock : FileCode2;
           return <button key={document.name} type="button" onClick={() => setSelected(document.name)} aria-pressed={selected === document.name}
-            className={cn('flex min-w-44 shrink-0 items-center gap-2.5 rounded-[10px] px-3 py-2.5 text-left transition focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-brand lg:min-w-0',
+            className={cn('flex min-w-44 shrink-0 items-center gap-2.5 rounded-control px-3 py-2.5 text-left transition focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-brand lg:min-w-0',
               selected === document.name ? 'bg-surface-3 text-ink' : 'text-ink-muted hover:bg-surface-2 hover:text-ink')}>
             <Icon className={cn('size-4 shrink-0', pending && 'text-ink-subtle')} />
             <span className="min-w-0 flex-1">

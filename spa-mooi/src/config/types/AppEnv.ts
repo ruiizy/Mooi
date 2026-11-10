@@ -8,7 +8,6 @@ export interface AppEnv {
   contactEmail: string;
   apiBaseUrl: string;
   sessionsBaseUrl: string;
-  sessionsRefreshMs: number;
   streamStaleMs: number;
   speechBaseUrl: string;
   googleClientId: string;

@@ -16,6 +16,9 @@ export interface Session {
   model: string;
   effort?: string | null;
   providerLabel: string;
+  /** The provider adapter the agent runs on, e.g. `cli` labelled "Claude CLI". */
+  adapter?: string;
+  adapterLabel?: string;
   branch: string;
   baseBranch: string;
   status: SessionStatus;
@@ -28,7 +31,7 @@ export interface Session {
   capabilities: AgentCapabilities;
   deployment: DeploymentSnapshot;
   deploymentSetup?: DeploymentSetup | null;
-  /** The workspace holds a root Compose file, so its deployment setup can be changed. */
+  /** The project's setup passed its test and the workspace holds a root Compose file: Deploy runs it directly. */
   deploymentConfigured?: boolean;
   /** The session's own clone on the sessions pod; null until provisioning has cloned it. */
   workspacePath: string | null;

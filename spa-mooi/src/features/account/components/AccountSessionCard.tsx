@@ -16,7 +16,7 @@ export const AccountSessionCard = () => {
 
   return (
     <Card className="p-5">
-      <h2 className="text-sm font-extrabold tracking-[-0.02em] text-ink">Your session</h2>
+      <h2 className="text-sm font-semibold tracking-[-0.015em] text-ink">Your session</h2>
       <p className="mt-2 text-[12px] leading-relaxed text-ink-muted">
         It stays alive between visits and renews itself while you use the platform. It also has an
         absolute age limit: past it you sign in again, however recently you were here.

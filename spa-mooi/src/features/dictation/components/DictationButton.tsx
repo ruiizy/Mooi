@@ -48,7 +48,7 @@ export const DictationButton = ({ field, dictation, disabled = false, className 
         title={label}
         aria-pressed={state === 'recording'}
         className={cn(
-          'relative inline-flex size-11 shrink-0 touch-none items-center justify-center rounded-[10px] transition duration-200 select-none [-webkit-touch-callout:none] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand active:scale-95 disabled:cursor-not-allowed disabled:opacity-50',
+          'relative inline-flex size-11 shrink-0 touch-none items-center justify-center rounded-control transition duration-200 select-none [-webkit-touch-callout:none] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand active:scale-95 disabled:cursor-not-allowed disabled:opacity-50',
           error && state === 'idle' ? 'text-danger hover:bg-danger-soft' : tones[state],
           className,
         )}

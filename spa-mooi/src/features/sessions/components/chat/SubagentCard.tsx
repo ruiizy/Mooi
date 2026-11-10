@@ -4,7 +4,6 @@ import { SubagentSection } from './SubagentSection';
 import { SubagentStatusPill } from './SubagentStatusPill';
 import { isTerminalSubagentStatus } from '@/features/sessions/lib/isTerminalSubagentStatus';
 import { subagentMeta } from '@/features/sessions/lib/subagentMeta';
-import { transcriptBlockKey } from '@/features/sessions/lib/transcriptBlockKey';
 import type { TranscriptBlock } from '@/features/sessions/types/TranscriptBlock';
 import type { TranscriptSubagent } from '@/features/sessions/types/TranscriptSubagent';
 import { cn } from '@/shared/utils/cn';
@@ -15,7 +14,8 @@ interface SubagentCardProps {
   subagent: TranscriptSubagent;
   /** Who delegated: the main agent, or the delegation this one is nested in. */
   delegatedBy: string;
-  renderBlock: (block: TranscriptBlock, delegatedBy: string) => ReactNode;
+  /** Renders the agent's own work the way a turn reads: its messages, folded activity and nested delegations. */
+  renderBlocks: (blocks: TranscriptBlock[], delegatedBy: string) => ReactNode;
 }
 
 const markdown = (text: string) => (
@@ -29,7 +29,7 @@ const markdown = (text: string) => (
  * whom, how it is going and what came back. Folded by default so the conversation stays readable;
  * the result previews while folded once the agent finished.
  */
-export const SubagentCard = ({ subagent, delegatedBy, renderBlock }: SubagentCardProps) => {
+export const SubagentCard = ({ subagent, delegatedBy, renderBlocks }: SubagentCardProps) => {
   const [open, setOpen] = useState(false);
   const bodyId = useId();
   const name = subagent.agentType ?? 'Subagent';
@@ -79,9 +79,7 @@ export const SubagentCard = ({ subagent, delegatedBy, renderBlock }: SubagentCar
 
           <SubagentSection title="Activity" empty={activityNote}>
             {subagent.blocks.length ? (
-              <div className="flex flex-col gap-2">
-                {subagent.blocks.map((block) => <div key={transcriptBlockKey(block)}>{renderBlock(block, name)}</div>)}
-              </div>
+              <div className="flex flex-col gap-3">{renderBlocks(subagent.blocks, name)}</div>
             ) : undefined}
           </SubagentSection>
 

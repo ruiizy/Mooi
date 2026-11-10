@@ -27,7 +27,7 @@ export const AttachImageButton = ({ onPick, disabled = false, reason = null, cla
         aria-label={label}
         title={label}
         className={cn(
-          'inline-flex size-11 shrink-0 items-center justify-center rounded-[10px] text-ink-muted transition duration-200 select-none hover:bg-surface-3 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand active:scale-95 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent',
+          'inline-flex size-11 shrink-0 items-center justify-center rounded-control text-ink-muted transition duration-200 select-none hover:bg-surface-3 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand active:scale-95 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent',
           className,
         )}
       >

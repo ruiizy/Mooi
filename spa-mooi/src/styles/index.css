@@ -20,46 +20,97 @@
   text-align: left;
 }
 
+/* The brand fill of primary calls to action: one gradient, defined once, used by buttons and marks. */
+@utility bg-brand-gradient {
+  background-image: linear-gradient(135deg, var(--brand-from), var(--brand-to));
+}
+
+/* Text set in the brand gradient, for the rare word that should carry the identity. */
+@utility text-brand-gradient {
+  background-image: linear-gradient(120deg, var(--brand-from), var(--brand-to));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* Live status text: a highlight sweeps across the words while the agent works, as in Codex. */
+@utility text-shimmer {
+  background-image: linear-gradient(90deg, var(--ink-subtle) 0%, var(--ink-subtle) 35%, var(--ink) 50%,
+    var(--ink-subtle) 65%, var(--ink-subtle) 100%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer 2.4s linear infinite;
+}
+
+/* A faint dotted grid for hero and empty surfaces. Static, so it costs one paint. */
+@utility bg-dot-grid {
+  background-image: radial-gradient(color-mix(in oklab, var(--ink) 9%, transparent) 1px, transparent 1px);
+  background-size: 18px 18px;
+}
+
+/* Hides a scroll container's bar while keeping it scrollable (chip rows, tab strips). */
+@utility scrollbar-none {
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
 :root {
-  --canvas: #ffffff;
+  /* The app frame behind the sidebar; `canvas` is the content panel laid on it. */
+  --shell: #f3f3f5;
+  --canvas: #fafafa;
   --surface: #ffffff;
-  --surface-2: #f6f6f6;
-  --surface-3: #eeeeee;
+  --surface-2: #f4f4f5;
+  --surface-3: #e9e9ec;
 
-  --line: #e2e2e2;
-  --line-strong: #cbcbcb;
+  --line: #e6e6e9;
+  --line-strong: #d1d1d6;
 
-  --ink: #000000;
-  --ink-muted: #545454;
-  --ink-subtle: #757575;
+  --ink: #09090b;
+  --ink-muted: #52525b;
+  --ink-subtle: #71717a;
 
-  --brand: #276ef1;
-  --brand-strong: #1e54b7;
-  --brand-soft: #eff3fe;
+  --brand: #2d5bff;
+  --brand-strong: #1f44d6;
+  --brand-soft: #eef2ff;
   --brand-ink: #ffffff;
+  --brand-from: #2f6bff;
+  --brand-to: #6d4dff;
   /* The logo's orb: one vivid blue on both themes, so the mark never changes identity. */
   --brand-vivid: #276ef1;
 
-  --contrast: #000000;
+  --contrast: #09090b;
   --contrast-ink: #ffffff;
 
-  --success: #03703c;
-  --warning: #674d1b;
-  --danger: #ab1300;
-  --info: #1e54b7;
-  --accent: #5b3fa8;
+  --success: #047a48;
+  --warning: #8a5a00;
+  --danger: #c2261b;
+  --info: #1f44d6;
+  --accent: #5b3fc4;
 
-  --success-dot: #06c167;
-  --warning-dot: #ffc043;
-  --danger-dot: #e11900;
-  --info-dot: #276ef1;
-  --accent-dot: #7356bf;
+  --success-dot: #10b981;
+  --warning-dot: #f5a524;
+  --danger-dot: #ef4444;
+  --info-dot: #3b82f6;
+  --accent-dot: #8b5cf6;
 
-  --success-soft: #e6f2ed;
-  --warning-soft: #fffaf0;
-  --danger-soft: #ffefed;
-  --info-soft: #eff3fe;
-  --accent-soft: #f3f0fa;
+  --success-soft: #e8f7f0;
+  --warning-soft: #fdf5e6;
+  --danger-soft: #fdeeed;
+  --info-soft: #eef2ff;
+  --accent-soft: #f3effd;
+
+  /* Elevation: light theme leans on soft, layered shadows; dark theme on borders and depth. */
+  --shadow-card: 0 1px 2px rgb(9 9 11 / 0.04), 0 1px 1px rgb(9 9 11 / 0.02);
+  --shadow-raised: 0 1px 2px rgb(9 9 11 / 0.05), 0 8px 24px -12px rgb(9 9 11 / 0.14);
+  --shadow-pop: 0 0 0 1px rgb(9 9 11 / 0.04), 0 4px 8px -2px rgb(9 9 11 / 0.06), 0 24px 56px -16px rgb(9 9 11 / 0.22);
+  --shadow-brand: 0 1px 2px rgb(45 91 255 / 0.25), 0 8px 20px -8px rgb(79 70 255 / 0.55);
+  /* The soft halo of the app's backdrop, behind the panels. */
+  --glow-a: color-mix(in oklab, #2f6bff 9%, transparent);
+  --glow-b: color-mix(in oklab, #8b5cf6 7%, transparent);
 
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-right: env(safe-area-inset-right, 0px);
@@ -74,47 +125,58 @@
 }
 
 .dark {
-  --canvas: #000000;
-  --surface: #121212;
-  --surface-2: #1c1c1c;
-  --surface-3: #272727;
+  --shell: #050506;
+  --canvas: #0a0a0c;
+  --surface: #0e0e11;
+  --surface-2: #17171b;
+  --surface-3: #222228;
 
-  --line: #2e2e2e;
-  --line-strong: #454545;
+  --line: #222227;
+  --line-strong: #33333b;
 
-  --ink: #f6f6f6;
-  --ink-muted: #b4b4b4;
-  --ink-subtle: #8f8f8f;
+  --ink: #f4f4f5;
+  --ink-muted: #a7a7b0;
+  --ink-subtle: #7b7b85;
 
-  --brand: #a0bff8;
-  --brand-strong: #c7d9fb;
-  --brand-soft: color-mix(in oklab, #276ef1 22%, transparent);
-  --brand-ink: #0b1c3d;
+  --brand: #85a5ff;
+  --brand-strong: #b4c6ff;
+  --brand-soft: color-mix(in oklab, #3b6cff 20%, transparent);
+  --brand-ink: #0a1236;
+  --brand-from: #3b6cff;
+  --brand-to: #7c5cff;
   --brand-vivid: #276ef1;
 
-  --contrast: #f6f6f6;
-  --contrast-ink: #000000;
+  --contrast: #f4f4f5;
+  --contrast-ink: #09090b;
 
-  --success: #5fd99a;
-  --warning: #ffc043;
-  --danger: #ff8c7a;
-  --info: #a0bff8;
-  --accent: #c1b2eb;
+  --success: #5ee0a8;
+  --warning: #fbc35a;
+  --danger: #ff8a80;
+  --info: #93b0ff;
+  --accent: #c3b4ff;
 
-  --success-dot: #06c167;
-  --warning-dot: #ffc043;
-  --danger-dot: #e11900;
-  --info-dot: #276ef1;
-  --accent-dot: #7356bf;
+  --success-dot: #10b981;
+  --warning-dot: #f5a524;
+  --danger-dot: #ef4444;
+  --info-dot: #3b82f6;
+  --accent-dot: #8b5cf6;
 
-  --success-soft: color-mix(in oklab, #06c167 18%, transparent);
-  --warning-soft: color-mix(in oklab, #ffc043 18%, transparent);
-  --danger-soft: color-mix(in oklab, #e11900 22%, transparent);
-  --info-soft: color-mix(in oklab, #276ef1 22%, transparent);
-  --accent-soft: color-mix(in oklab, #7356bf 24%, transparent);
+  --success-soft: color-mix(in oklab, #10b981 15%, transparent);
+  --warning-soft: color-mix(in oklab, #f5a524 15%, transparent);
+  --danger-soft: color-mix(in oklab, #ef4444 17%, transparent);
+  --info-soft: color-mix(in oklab, #3b6cff 18%, transparent);
+  --accent-soft: color-mix(in oklab, #8b5cf6 20%, transparent);
+
+  --shadow-card: 0 0 0 0 transparent;
+  --shadow-raised: 0 1px 0 0 rgb(255 255 255 / 0.03) inset, 0 12px 32px -16px rgb(0 0 0 / 0.8);
+  --shadow-pop: 0 0 0 1px rgb(255 255 255 / 0.04), 0 24px 64px -12px rgb(0 0 0 / 0.85);
+  --shadow-brand: 0 1px 2px rgb(0 0 0 / 0.4), 0 8px 24px -8px rgb(79 92 255 / 0.6);
+  --glow-a: color-mix(in oklab, #3b6cff 13%, transparent);
+  --glow-b: color-mix(in oklab, #7c5cff 10%, transparent);
 }
 
 @theme inline {
+  --color-shell: var(--shell);
   --color-canvas: var(--canvas);
   --color-surface: var(--surface);
   --color-surface-2: var(--surface-2);
@@ -155,20 +217,46 @@
   --color-accent-soft: var(--accent-soft);
 
   --color-ring: var(--brand);
+
+  --shadow-card: var(--shadow-card);
+  --shadow-raised: var(--shadow-raised);
+  --shadow-pop: var(--shadow-pop);
+  --shadow-brand: var(--shadow-brand);
 }
 
 @theme {
-  --font-sans: 'Plus Jakarta Sans', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
-  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-sans: 'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* Geist is variable: weights sit between the named steps, so headings stay crisp, never heavy. */
+  --font-weight-medium: 500;
+  --font-weight-semibold: 560;
+  --font-weight-bold: 600;
+  --font-weight-extrabold: 650;
+
+  /* One radius scale for the whole product: chips, controls, cards, panels. */
+  --radius-chip: 7px;
+  --radius-control: 9px;
+  --radius-card: 14px;
+  --radius-panel: 18px;
+
+  /* Motion: short, decelerating, transform and opacity only, so it stays on the compositor. */
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-spring: cubic-bezier(0.32, 0.72, 0, 1);
+  --default-transition-duration: 160ms;
+  --default-transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
 
   --animate-float-slow: float 20s ease-in-out infinite;
   --animate-float-fast: float 14s ease-in-out infinite reverse;
   --animate-rise: rise 0.7s cubic-bezier(0.16, 1, 0.3, 1) both;
+  --animate-fade-up: fade-up 0.32s cubic-bezier(0.16, 1, 0.3, 1) both;
+  --animate-fade-in: fade-in 0.2s ease-out both;
   --animate-pulse-soft: pulse-soft 1.6s ease-in-out infinite;
   --animate-shimmer: shimmer 2s linear infinite;
   --animate-menu-in: menu-in 0.16s cubic-bezier(0.16, 1, 0.3, 1) both;
   --animate-drawer-in: drawer-in 0.28s cubic-bezier(0.32, 0.72, 0, 1) both;
   --animate-sheet-in: sheet-in 0.32s cubic-bezier(0.32, 0.72, 0, 1) both;
+  --animate-dialog-in: dialog-in 0.22s cubic-bezier(0.16, 1, 0.3, 1) both;
   --animate-voice-bar: voice-bar 0.9s ease-in-out infinite;
   --animate-orb-ping: orb-ping 2.4s cubic-bezier(0, 0, 0.2, 1) infinite;
   --animate-step-fill: step-fill linear both;
@@ -191,6 +279,27 @@
     to {
       opacity: 1;
       transform: translateY(0);
+    }
+  }
+
+  /* Content arriving: a few pixels of travel, enough to read as motion without slowing the eye. */
+  @keyframes fade-up {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
     }
   }
 
@@ -266,6 +375,18 @@
     }
   }
 
+  /* A centered dialog grows out of the screen rather than dropping onto it. */
+  @keyframes dialog-in {
+    from {
+      opacity: 0;
+      transform: translateY(8px) scale(0.98);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+
   /* Short and slightly scaled: a menu should read as opening from its trigger, not as arriving. */
   @keyframes menu-in {
     from {
@@ -308,7 +429,10 @@
     min-width: 320px;
     background-color: var(--canvas);
     color: var(--ink);
+    font-family: var(--font-sans);
+    font-feature-settings: 'ss01', 'cv11';
     -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeLegibility;
     -webkit-touch-callout: none;
   }
@@ -338,10 +462,16 @@
   input, textarea, select { min-width: 0; }
   :focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
   :disabled { cursor: not-allowed; }
-  h1, h2, h3 { overflow-wrap: anywhere; }
+  h1, h2, h3 { overflow-wrap: anywhere; text-wrap: balance; }
+  code, kbd, pre, samp { font-family: var(--font-mono); font-feature-settings: normal; }
 
   ::selection {
-    background-color: color-mix(in oklab, var(--brand) 35%, transparent);
+    background-color: color-mix(in oklab, var(--brand) 32%, transparent);
+  }
+
+  * {
+    scrollbar-color: var(--line-strong) transparent;
+    scrollbar-width: thin;
   }
 
   ::-webkit-scrollbar {
@@ -358,6 +488,10 @@
     border-radius: 9999px;
     background-clip: content-box;
     background-color: var(--line-strong);
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: var(--ink-subtle);
   }
 }
 

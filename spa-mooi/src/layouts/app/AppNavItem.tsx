@@ -7,6 +7,7 @@ interface AppNavItemProps {
   onNavigate?: () => void;
 }
 
+/** The active row is lifted onto a surface with a brand bar at its edge: where you are, at a glance. */
 export const AppNavItem = ({ link, onNavigate }: AppNavItemProps) => {
   const Icon = link.icon;
 
@@ -17,18 +18,31 @@ export const AppNavItem = ({ link, onNavigate }: AppNavItemProps) => {
       onClick={onNavigate}
       className={({ isActive }) =>
         cn(
-          'flex h-11 items-center gap-3 rounded-[10px] px-3 text-sm font-bold transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand',
-          isActive ? 'bg-surface-2 text-ink' : 'text-ink-muted hover:bg-surface-2 hover:text-ink',
+          'group/nav relative flex h-9 items-center gap-2.5 rounded-control px-2.5 text-[13.5px] font-medium transition-[background-color,color,box-shadow] duration-150 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand max-lg:h-11',
+          isActive
+            ? 'bg-surface text-ink shadow-card ring-1 ring-line'
+            : 'text-ink-muted hover:bg-surface/60 hover:text-ink',
         )
       }
     >
-      <Icon className="size-4.5 shrink-0" />
-      {link.label}
-      {link.adminOnly ? (
-        <span className="ml-auto text-[9px] font-extrabold tracking-[0.08em] text-ink-subtle uppercase">
-          Admin only
-        </span>
-      ) : null}
+      {({ isActive }) => (
+        <>
+          <span
+            aria-hidden
+            className={cn(
+              'absolute top-1/2 -left-3 h-4 w-[3px] -translate-y-1/2 rounded-r-full bg-brand-gradient transition-[opacity,transform] duration-200',
+              isActive ? 'opacity-100' : 'scale-y-0 opacity-0',
+            )}
+          />
+          <Icon className={cn('size-4 shrink-0 transition-colors', isActive ? 'text-brand' : 'text-ink-subtle group-hover/nav:text-ink-muted')} />
+          {link.label}
+          {link.adminOnly ? (
+            <span className="ml-auto rounded-full border border-line px-1.5 py-px font-mono text-[9px] font-medium tracking-[0.08em] text-ink-subtle uppercase">
+              Admin
+            </span>
+          ) : null}
+        </>
+      )}
     </NavLink>
   );
 };

@@ -3,6 +3,7 @@ import { ChevronRight, GitBranch } from 'lucide-react';
 import { sessionPath } from '@/app/paths';
 import { SessionStatusBadge } from '@/features/sessions/components/SessionStatusBadge';
 import { SessionAccountIdentity } from '@/features/sessions/components/SessionAccountIdentity';
+import { SessionUsageMeters } from '@/features/sessions/components/SessionUsageMeters';
 import { WorkspacePathLabel } from '@/features/sessions/components/WorkspacePathLabel';
 import type { Session } from '@/features/sessions/types/Session';
 import type { BackLink } from '@/shared/types/BackLink';
@@ -27,7 +28,7 @@ export const SessionListItem = ({ session, backLink }: SessionListItemProps) => 
       </span>
 
       <div className="min-w-0 flex-1">
-        <p className="flex min-w-0 items-center gap-1.5 text-sm font-extrabold text-ink">
+        <p className="flex min-w-0 items-center gap-1.5 text-sm font-semibold text-ink">
           <GitBranch className="size-3.5 shrink-0 text-ink-subtle" />
           <span className="truncate font-mono">{session.branch}</span>
         </p>
@@ -36,7 +37,10 @@ export const SessionListItem = ({ session, backLink }: SessionListItemProps) => 
         </p>
         <span className="mt-0.5 block sm:hidden"><SessionAccountIdentity session={session} compact /></span>
         <WorkspacePathLabel path={session.workspacePath} className="mt-1" />
+        <SessionUsageMeters session={session} className="mt-2 max-w-60 sm:hidden" />
       </div>
+
+      <SessionUsageMeters session={session} className="hidden w-36 shrink-0 sm:grid" />
 
       <span className="hidden min-w-0 max-w-32 shrink-0 sm:block"><SessionAccountIdentity session={session} /></span>
 

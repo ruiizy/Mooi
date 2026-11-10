@@ -19,7 +19,14 @@ Adding a provider:
 4. `interrupt()` may be a no-op when the `interrupt` capability is `False`.
 5. A broken transport costs at most the running turn: `recover()` reconnects keeping the
    conversation, and a long-lived stream recovers itself before it reports `failed`.
-6. Register a `ProviderDescriptor` in `PROVIDERS`.
+6. `trace_sources()` names where the provider's native session log lives (`traces.TraceSource`), so
+   the Trace tab reads it; it is cheap and may return `[]` before the conversation exists.
+7. Register a `ProviderDescriptor` in `PROVIDERS`.
+
+A provider may have several adapters (`AdapterDescriptor`): implementations of the same contract
+with a different integration technology, e.g. Claude through its SDK or through its CLI. Each one
+is a complete `AgentRuntime`; a session picks one when it opens and keeps it. Adding an adapter is
+adding its runtime class to the provider's `adapters`; the first one is the default.
 
 Nothing outside this module changes.
 """
@@ -43,13 +50,18 @@ from pathlib import Path
 from typing import Any, ClassVar, Protocol, TypedDict, runtime_checkable
 from uuid import UUID, uuid4
 
-# The single import of a vendor SDK in the whole service belongs to the Claude adapters, and a second provider's SDK must stay confined to its own adapter the same way.
+# The single import of a vendor SDK in the whole service belongs to the Claude SDK adapter, and a second provider's SDK must stay confined to its own adapter the same way. The Claude CLI adapter imports none: it drives the CLI through `claude_cli`.
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
     CLIJSONDecodeError,
     ConversationResetMessage,
+    HookCallback,
+    HookContext,
+    HookInput,
+    HookJSONOutput,
+    HookMatcher,
     PermissionResult,
     PermissionResultAllow,
     PermissionResultDeny,
@@ -68,11 +80,14 @@ from claude_agent_sdk import (
     UserMessage,
 )
 
+from mic_sessions.shared import claude_cli
+from mic_sessions.shared.agent_conduct import conduct_instructions
 from mic_sessions.shared.browser import playwright_server
 from mic_sessions.shared.env import get_settings
 from mic_sessions.shared import images as session_images
 from mic_sessions.shared.images import Image
 from mic_sessions.shared.mooi import Credential
+from mic_sessions.shared.traces import TraceSource, codex_rollout
 from mic_sessions.shared.web import ApiException
 
 LOG = logging.getLogger("sessions")
@@ -174,6 +189,33 @@ def _with_parent(event: AgentEvent, parent: str | None) -> AgentEvent:
     if not parent or parent == "root":
         return event
     return {"type": event["type"], "data": {**event["data"], "parentToolUseId": parent}}
+
+
+def _claude_task_update(task_tools: dict[str, str], subtype: str, data: Mapping[str, Any]) -> AgentEvent | None:
+    """Claude reports each delegated agent as a task tied to the `Agent` tool call that started
+    it. Tasks of other tools (a background command) share the shape; clients ignore those.
+    `task_tools` remembers task id -> delegating call, since later task updates omit the call."""
+    task_id = str(data.get("task_id") or "")
+    tool_use_id = data.get("tool_use_id") or task_tools.get(task_id)
+    if not isinstance(tool_use_id, str) or not tool_use_id:
+        return None
+    if task_id:
+        task_tools[task_id] = tool_use_id
+    patch = data.get("patch") if isinstance(data.get("patch"), dict) else {}
+    status = {"task_started": "started", "task_progress": "working"}.get(subtype) or _TASK_STATUSES.get(
+        str(patch.get("status") or data.get("status") or ""))
+    if status is None:
+        return None
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    summary = data.get("summary") if subtype == "task_notification" else patch.get("error")
+    return subagent_updated(
+        tool_use_id, taskId=task_id or None, status=status,
+        description=data.get("description") or None,
+        lastToolName=data.get("last_tool_name") or None,
+        summary=summary if isinstance(summary, str) and summary else None,
+        usage={"totalTokens": usage.get("total_tokens"), "toolUses": usage.get("tool_uses"),
+               "durationMs": usage.get("duration_ms")} if usage else None,
+    )
 
 
 def permission_request(request_id: str, tool_name: str, title: str, input_data: dict[str, Any]) -> AgentEvent:
@@ -332,9 +374,14 @@ class AgentRuntime(Protocol):
 
     async def interrupt(self) -> None: ...
 
-    async def compact(self) -> None: ...
+    async def compact(self, instructions: str | None = None) -> None: ...
 
     async def close(self) -> None: ...
+
+    def trace_sources(self) -> Sequence[TraceSource]:
+        """Where this conversation's native session log lives, for the Trace tab. Cheap: called on every
+        trace sync. May return `[]` before the conversation exists or after `close()` (which deletes it)."""
+        ...
 
     async def recover(self) -> None:
         """Reconnect after a broken provider transport, keeping the conversation and the workspace:
@@ -504,6 +551,63 @@ def _validate_agent_workspace(workspace_path: Path, expected_branch: str) -> Pat
     return workspace
 
 
+def _claude_model_label(entry: dict[str, Any], model_id: str) -> str:
+    """Versioned name for a Claude Code alias, e.g. "Opus 5.5" for `opus`.
+
+    Aliases stay the stable ids (they follow upgrades), but the CLI only names the family in
+    `displayName`; its `description` leads with the current version ("Opus 5.5 · ..."). Any other
+    shape falls back to the family name, so a CLI wording change never breaks the catalog.
+    """
+    name = entry.get("displayName") or model_id
+    description = entry.get("description")
+    headline = description.split("·", 1)[0].strip() if isinstance(description, str) else ""
+    return headline if headline.lower().startswith(f"{name.lower()} ") and len(headline) <= 40 else name
+
+
+_CLAUDE_CONDUCT = conduct_instructions(edit_tools="the Write, Edit, MultiEdit and NotebookEdit tools")
+
+# `rtk rewrite` exit codes that come with a rewritten command: 0 plain, 3 when a settings `ask` rule
+# matched (every tool is approved here anyway). 1 means no RTK filter, 2 a settings `deny` rule.
+_RTK_REWRITTEN = {0, 3}
+_RTK_TIMEOUT_SECONDS = 5
+
+
+def _shell_compressor(rtk: str) -> HookCallback:
+    """PreToolUse hook running Bash commands through RTK, which keeps only what the model needs of
+    their output (as RTK's own Claude Code hook does), so every later request carries less context.
+
+    Only the executed command changes: the transcript keeps the agent's command, and a command RTK
+    does not know, or any RTK failure, runs unchanged. It never denies: a denied call is paid twice.
+    """
+
+    async def compress(input_data: HookInput, tool_use_id: str | None, context: HookContext) -> HookJSONOutput:
+        tool_input = input_data.get("tool_input") or {}
+        command = tool_input.get("command")
+        if not isinstance(command, str) or not command.strip():
+            return {}
+        try:
+            process = await asyncio.create_subprocess_exec(
+                rtk, "rewrite", command, cwd=input_data.get("cwd") or None,
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            )
+            try:
+                stdout, _ = await asyncio.wait_for(process.communicate(), _RTK_TIMEOUT_SECONDS)
+            except TimeoutError:
+                process.kill()
+                await process.wait()
+                raise
+        except Exception:
+            LOG.warning("RTK could not rewrite a shell command; it runs unchanged", exc_info=True)
+            return {}
+        rewritten = stdout.decode("utf-8", "replace").strip()
+        if process.returncode not in _RTK_REWRITTEN or not rewritten or rewritten == command:
+            return {}
+        return {"hookSpecificOutput": {
+            "hookEventName": "PreToolUse", "updatedInput": {**tool_input, "command": rewritten}}}
+
+    return compress
+
+
 class ClaudeAgentRuntime:
     """Adapter for Claude Code through `claude_agent_sdk`, the only module here that imports it.
 
@@ -552,7 +656,7 @@ class ClaudeAgentRuntime:
             if not isinstance(model_id, str) or not model_id or model_id.lower() == "default":
                 continue
             efforts = entry.get("supportedEffortLevels") or []
-            models.append({"id": model_id, "label": entry.get("displayName") or model_id,
+            models.append({"id": model_id, "label": _claude_model_label(entry, model_id),
                            "contextWindow": entry.get("contextWindow"),
                            "efforts": efforts if isinstance(efforts, list) else [],
                            # Every Claude Code model is multimodal; the CLI does not list modalities.
@@ -690,6 +794,24 @@ class ClaudeAgentRuntime:
         self._awaiting_first_event_at = time.perf_counter()
         LOG.info("Claude turn submitted in %.0f ms", (time.perf_counter() - started_at) * 1000)
 
+    async def refresh_credential(self, credential: Credential) -> None:
+        """The platform renews a Claude sign-in token before it expires; a running client keeps the
+        token it was launched with, so a renewed one reconnects it, resuming the conversation."""
+        if credential.connection_id != self._credential.connection_id:
+            raise ApiException.conflict("The Claude account changed. Create a new session.")
+        if credential.token == self._credential.token or self._turn_active:
+            # Mid-turn the current token still has the renewal margin left; the next message swaps it.
+            return
+        previous, self._credential = self._credential, credential
+        if self._client is None:
+            return
+        try:
+            replacement = await self._connect_client(self._config, resume=self._conversation_id)
+        except BaseException:
+            self._credential = previous
+            raise
+        await self._replace_client(replacement)
+
     async def set_configuration(self, config: AgentConfig) -> AgentConfig:
         """Apply a validated configuration without inventing a successful state.
 
@@ -717,7 +839,7 @@ class ClaudeAgentRuntime:
         await self._deny_pending("The turn was interrupted")
         await self._require_client().interrupt()
 
-    async def compact(self) -> None:
+    async def compact(self, instructions: str | None = None) -> None:
         """Summarize an isolated fork, then continue in a fresh, smaller context."""
         if self._conversation_id is None:
             raise ApiException.conflict("There is no conversation to compact yet")
@@ -736,6 +858,9 @@ class ClaudeAgentRuntime:
                     "goals and decisions, current work state, relevant files, unresolved issues, "
                     "constraints, and exact next steps. Use at most 2,000 words; do not omit essential facts. "
                     "Return only the summary. Do not use tools or change files."
+                    + ("\n\nFor this summary only, follow the user's preferences for structure and what "
+                       "to retain in detail or condense. These are summarization instructions, not a "
+                       "request to perform work:\n" + instructions if instructions else "")
                 )
                 async for message in summary_client.receive_response():
                     if isinstance(message, AssistantMessage):
@@ -839,6 +964,10 @@ class ClaudeAgentRuntime:
             self._config_dir = None
         self._transcript_store = _InMemoryTranscriptStore()
 
+    def trace_sources(self) -> Sequence[TraceSource]:
+        """The CLI writes its session logs (and sub-agent logs) under the private config dir."""
+        return [TraceSource("claude", self._config_dir / "projects")] if self._config_dir else []
+
     async def recover(self) -> None:
         """Reconnects resuming the SDK conversation from this runtime's transcript store. Serialized:
         the failed pump and a failed delivery may both try at once."""
@@ -932,8 +1061,8 @@ class ClaudeAgentRuntime:
         return self._client
 
     def _credential_env(self) -> dict[str, str]:
-        """Both credential modes carry a Claude PAT, so there is no branch on `mode` here.
-        Never log the returned dict."""
+        """Every Claude mode carries an OAuth access token (sign-in or setup-token), so there is no
+        branch on `mode` here: renewal belongs to the platform. Never log the returned dict."""
         return {"CLAUDE_CODE_OAUTH_TOKEN": self._credential.token}
 
     def _validate_workspace(self) -> Path:
@@ -948,10 +1077,7 @@ class ClaudeAgentRuntime:
         plugins = ([{"type": "local", "path": str(self._workspace)}]
                    if (self._workspace / ".claude-plugin" / "plugin.json").is_file() else [])
         system_append = (
-            "Prefer the dedicated Read tool for reading files and Edit, MultiEdit, "
-            "Write or NotebookEdit for changing files when applicable, so the session "
-            "can display file operations and their results clearly. Use shell tools "
-            "for commands that require them.\n\n"
+            _CLAUDE_CONDUCT + "\n\n"
             "The session shows the user every image a tool returns. To deliver an image "
             "(created, rendered, converted or captured), save it as a PNG, JPEG, WebP or GIF "
             "file and open it with the Read tool."
@@ -960,6 +1086,8 @@ class ClaudeAgentRuntime:
             system_append += "\n\n" + self._instructions
         if self._compacted_context:
             system_append += "\n\nContext retained from the conversation before compaction:\n" + self._compacted_context
+        rtk = shutil.which("rtk") if settings.agent_claude_rtk else None
+        hooks = {"PreToolUse": [HookMatcher(matcher="Bash", hooks=[_shell_compressor(rtk)])]} if rtk else None
         return ClaudeAgentOptions(
             cwd=str(self._workspace),
             env={
@@ -978,6 +1106,7 @@ class ClaudeAgentRuntime:
             # own questions reach the player.
             permission_mode="default",
             can_use_tool=self._can_use_tool,
+            hooks=hooks,
             sandbox={"enabled": False},
             include_partial_messages=True,
             max_buffer_size=settings.agent_claude_max_message_bytes,
@@ -1161,29 +1290,9 @@ class ClaudeAgentRuntime:
             })
 
     async def _on_task_message(self, subtype: str, data: Mapping[str, Any]) -> None:
-        """Claude reports each delegated agent as a task tied to the `Agent` tool call that started
-        it. Tasks of other tools (a background command) share the shape; clients ignore those."""
-        task_id = str(data.get("task_id") or "")
-        tool_use_id = data.get("tool_use_id") or self._task_tools.get(task_id)
-        if not isinstance(tool_use_id, str) or not tool_use_id:
-            return
-        if task_id:
-            self._task_tools[task_id] = tool_use_id
-        patch = data.get("patch") if isinstance(data.get("patch"), dict) else {}
-        status = {"task_started": "started", "task_progress": "working"}.get(subtype) or _TASK_STATUSES.get(
-            str(patch.get("status") or data.get("status") or ""))
-        if status is None:
-            return
-        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
-        summary = data.get("summary") if subtype == "task_notification" else patch.get("error")
-        await self._publish(subagent_updated(
-            tool_use_id, taskId=task_id or None, status=status,
-            description=data.get("description") or None,
-            lastToolName=data.get("last_tool_name") or None,
-            summary=summary if isinstance(summary, str) and summary else None,
-            usage={"totalTokens": usage.get("total_tokens"), "toolUses": usage.get("tool_uses"),
-                   "durationMs": usage.get("duration_ms")} if usage else None,
-        ))
+        event = _claude_task_update(self._task_tools, subtype, data)
+        if event is not None:
+            await self._publish(event)
 
     async def _on_stream_event(self, message: Any) -> None:
         """Partial-message deltas. The SDK carries the raw Anthropic event in `event`; older
@@ -1341,11 +1450,724 @@ def _stream_failure_message(error: Exception) -> str:
     return f"{_INTERRUPTED_MESSAGE} ({cause}). Restoring the conversation; the workspace and its changes are kept."
 
 
+class ClaudeCliAgentRuntime:
+    """Adapter for Claude Code through its own CLI (`claude --print`, stream-json), without the SDK.
+
+    Same contract and capabilities as `ClaudeAgentRuntime`, implemented with the CLI's native
+    features: the conversation id is chosen up front (`--session-id`) and the CLI persists the
+    transcript in this runtime's private config directory, so reconnecting and changing the effort
+    simply `--resume` it; compaction is the CLI's own `/compact`; tool approvals and the RTK hook
+    travel over its stdio control protocol. One process per session, bound to one player token.
+    """
+
+    # Side questions need an isolated, tool-less fork of the conversation, which only the SDK adapter implements.
+    capabilities: ClassVar[AgentCapabilities] = replace(CLAUDE_CAPABILITIES, asides=False)
+    _catalog: ClassVar[ContextVar[dict[str, Any] | None]] = ContextVar('claude_cli_catalog', default=None)
+    _catalogs: ClassVar[dict[str, tuple[float, dict[str, Any]]]] = {}
+
+    @classmethod
+    async def load_configuration(cls, credential: Credential, refresh: bool = False) -> None:
+        """The model catalog is the `initialize` answer of a throwaway CLI process."""
+        cached = cls._catalogs.get(credential.connection_id or '')
+        if not refresh and cached and cached[0] > time.monotonic():
+            cls._catalog.set(cached[1])
+            return
+        settings = get_settings()
+        with tempfile.TemporaryDirectory(prefix="mooi-claude-cli-models-") as config_dir:
+            try:
+                cli = claude_cli.ClaudeCli(
+                    [claude_cli.executable(settings.agent_claude_cli), *_CLAUDE_CLI_STREAM, "--setting-sources="],
+                    cwd=Path(config_dir), env=claude_cli.environment(_claude_cli_credential_env(credential, config_dir)),
+                )
+                info = await cli.start(timeout=30)
+            except Exception:
+                LOG.exception("Could not load Claude CLI models")
+                raise ApiException(502, "Could not load Claude models. Check your connection and try again.") from None
+            finally:
+                with suppress(Exception):
+                    await cli.close()
+
+        models = []
+        for entry in info.get("models") or []:
+            model_id = entry.get("value")
+            if not isinstance(model_id, str) or not model_id or model_id.lower() == "default":
+                continue
+            efforts = entry.get("supportedEffortLevels") or []
+            models.append({"id": model_id, "label": _claude_model_label(entry, model_id),
+                           "contextWindow": entry.get("contextWindow"),
+                           "efforts": efforts if isinstance(efforts, list) else [], "images": True})
+        if not models:
+            raise ApiException(502, "Claude returned no available models. Check your connection and try again.")
+        preferred = settings.agent_claude_model
+        default = next((item for item in models if item["id"] == preferred), models[0])
+        catalog = {"id": "claude", "label": "Claude", "models": models,
+                   "defaultModel": default["id"], "defaultEffort": settings.agent_claude_effort}
+        if credential.connection_id:
+            for key, (expires, _) in list(cls._catalogs.items()):
+                if expires < time.monotonic():
+                    cls._catalogs.pop(key, None)
+            if len(cls._catalogs) >= 1024:
+                cls._catalogs.pop(next(iter(cls._catalogs)))
+            cls._catalogs[credential.connection_id] = (time.monotonic() + 300, catalog)
+        cls._catalog.set(catalog)
+
+    @classmethod
+    def configuration(cls) -> dict[str, Any]:
+        return cls._catalog.get() or {"id": "claude", "label": "Claude", "models": [],
+                                      "defaultModel": "", "defaultEffort": None}
+
+    @classmethod
+    def configure(cls, model: str | None, effort: str | None) -> AgentConfig:
+        catalog = cls.configuration()
+        chosen = model or catalog["defaultModel"]
+        candidate = next((item for item in catalog["models"] if item["id"] == chosen), None)
+        if candidate is None:
+            raise ApiException.bad_request("Unsupported model")
+        supported = candidate["efforts"]
+        default = catalog["defaultEffort"]
+        chosen_effort = effort if effort is not None else (
+            default if default in supported else supported[0] if supported else None)
+        if chosen_effort is not None and chosen_effort not in supported:
+            raise ApiException.bad_request("Unsupported effort for this model")
+        return AgentConfig(chosen, chosen_effort)
+
+    def __init__(
+        self,
+        credential: Credential,
+        workspace: Path,
+        branch: str,
+        emit: Emit,
+        ask: Ask,
+        config: AgentConfig,
+        *,
+        instructions: str = "",
+        environment: Mapping[str, str] | None = None,
+    ) -> None:
+        self._config = config
+        self._instructions = instructions
+        self._environment = dict(environment or {})
+        self._credential = credential
+        self._workspace = workspace
+        self._branch = branch
+        self._emit = emit
+        self._ask = ask
+        self._cli: claude_cli.ClaudeCli | None = None
+        self._clis: set[claude_cli.ClaudeCli] = set()
+        self._pump: asyncio.Task[None] | None = None
+        self._pending: dict[str, _PendingRequest] = {}
+        self._stream_message_id: str | None = None
+        self._stream_ids: dict[str, str] = {}
+        self._assistant_block_offsets: dict[tuple[str, str], int] = {}
+        # Claude task id -> the tool call that delegated it; later task updates omit the call.
+        self._task_tools: dict[str, str] = {}
+        self._context_input: int | None = None
+        self._context_output = 0
+        self._context_model: str | None = None
+        self._context_window: int | None = None
+        self._last_quota = None
+        self._interrupted = False
+        self._turn_active = False
+        self._awaiting_first_event_at: float | None = None
+        self._config_dir: Path | None = None
+        self._recovery_lock = asyncio.Lock()
+        # The CLI's own conversation id; it holds a saved transcript once a turn has ended.
+        self._conversation_id = str(uuid4())
+        self._conversation_saved = False
+        self._compaction: asyncio.Future[None] | None = None
+        self._compaction_error: str | None = None
+
+    async def start(self) -> None:
+        started_at = time.perf_counter()
+        self._workspace = await asyncio.to_thread(self._validate_workspace)
+        # Outside the checkout, inside the owned session directory: the CLI keeps its transcripts
+        # here, and workspace reconciliation removes it after an unclean service exit.
+        self._config_dir = Path(tempfile.mkdtemp(prefix="claude-cli-", dir=self._workspace.parent))
+        self._cli = await self._connect(self._config)
+        self._pump = asyncio.create_task(self._pump_messages(self._cli))
+        await asyncio.gather(self._refresh_context(), self._refresh_quota())
+        LOG.info("Claude CLI runtime connected in %.0f ms", (time.perf_counter() - started_at) * 1000)
+
+    async def _refresh_context(self) -> None:
+        from mic_sessions.shared import claude_usage
+        context = await claude_usage.context(self._require_cli())
+        if context is not None:
+            self._context_window = context["limitTokens"]
+            await self._emit("session.usage", {"context": context})
+
+    async def _refresh_quota(self, *, refresh: bool = False) -> None:
+        from mic_sessions.shared import claude_usage
+        quota = await claude_usage.quota(self._credential.connection_id, self._credential.token, refresh=refresh)
+        if quota != self._last_quota:
+            self._last_quota = quota
+            await self._emit("session.usage", {"quota": quota})
+
+    async def refresh_usage(self) -> None:
+        await self._refresh_quota()
+
+    async def send(self, text: str, images: Sequence[Image] = ()) -> None:
+        self._interrupted = False
+        started_at = time.perf_counter()
+        cli = self._require_cli()
+        self._turn_active = True
+        content: str | list[dict[str, Any]] = text
+        if images:
+            # Images precede the text, as the Messages API recommends for multimodal prompts.
+            content = await asyncio.to_thread(lambda: [
+                {"type": "image", "source": {"type": "base64", "media_type": image.media_type,
+                                             "data": image.base64()}} for image in images])
+            if text:
+                content.append({"type": "text", "text": text})
+        try:
+            await cli.send_user(content, self._conversation_id)
+        except BaseException:
+            self._turn_active = False
+            raise
+        self._awaiting_first_event_at = time.perf_counter()
+        LOG.info("Claude CLI turn submitted in %.0f ms", (time.perf_counter() - started_at) * 1000)
+
+    async def refresh_credential(self, credential: Credential) -> None:
+        """The platform renews a Claude sign-in token before it expires; a running CLI keeps the token
+        it was launched with, so a renewed one relaunches it, resuming its saved conversation."""
+        if credential.connection_id != self._credential.connection_id:
+            raise ApiException.conflict("The Claude account changed. Create a new session.")
+        if credential.token == self._credential.token or self._turn_active:
+            # Mid-turn the current token still has the renewal margin left; the next message swaps it.
+            return
+        previous, self._credential = self._credential, credential
+        if self._cli is None:
+            return
+        try:
+            replacement = await self._connect(self._config)
+        except BaseException:
+            self._credential = previous
+            raise
+        await self._replace(replacement)
+
+    async def set_configuration(self, config: AgentConfig) -> AgentConfig:
+        """A model change is applied live (`set_model`); an effort is a launch flag, so the CLI is
+        relaunched resuming its saved conversation and replaces the running one only once up."""
+        if config == self._config:
+            return self._config
+        if config.effort == self._config.effort:
+            await self._require_cli().request({"subtype": "set_model", "model": config.model})
+        else:
+            await self._replace(await self._connect(config))
+        self._config = config
+        await self._refresh_context()
+        return self._config
+
+    async def interrupt(self) -> None:
+        self._interrupted = True
+        await self._deny_pending("The turn was interrupted")
+        await self._require_cli().request({"subtype": "interrupt"})
+
+    async def compact(self, instructions: str | None = None) -> None:
+        """The CLI's native `/compact`: it summarizes the conversation and continues in place.
+        Its messages are consumed here and never reach the transcript as a turn."""
+        if not self._conversation_saved:
+            raise ApiException.conflict("There is no conversation to compact yet")
+        cli = self._require_cli()
+        self._compaction = asyncio.get_running_loop().create_future()
+        self._compaction_error = None
+        try:
+            command = "/compact" + (" " + " ".join(instructions.split()) if instructions else "")
+            await cli.send_user(command, self._conversation_id)
+            async with asyncio.timeout(600):
+                await self._compaction
+        finally:
+            self._compaction = None
+        self._reset_stream_state()
+        self._context_input = None
+        self._context_output = 0
+        await self._emit("session.usage", {"context": None})
+        await self._refresh_context()
+        try:
+            await self._refresh_quota(refresh=True)
+        except Exception:
+            LOG.debug("Claude quota is unavailable after compaction", exc_info=True)
+
+    async def close(self) -> None:
+        if self._pump is not None:
+            self._pump.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await self._pump
+            self._pump = None
+        await self._deny_pending("The session was closed")
+        self._fail_compaction("The session was closed")
+        for cli in tuple(self._clis):
+            # close() always ends the process (the group is killed last), so the workspace is free.
+            await cli.close()
+            self._clis.discard(cli)
+        self._cli = None
+        if self._config_dir is not None:
+            cleanup = asyncio.create_task(asyncio.to_thread(shutil.rmtree, self._config_dir, True))
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                await cleanup
+                self._config_dir = None
+                raise
+            self._config_dir = None
+
+    def trace_sources(self) -> Sequence[TraceSource]:
+        """The CLI writes its session logs (and sub-agent logs) under the private config dir."""
+        return [TraceSource("claude", self._config_dir / "projects")] if self._config_dir else []
+
+    async def recover(self) -> None:
+        """Relaunches the CLI resuming its saved conversation. Serialized: the failed pump and a
+        failed delivery may both try at once."""
+        async with self._recovery_lock:
+            if self._config_dir is None:
+                await self.start()
+                return
+            await self._deny_pending(_INTERRUPTED_MESSAGE)
+            replacement = await self._connect(self._config)
+            if self._cli is None:
+                self._cli = replacement
+                self._pump = asyncio.create_task(self._pump_messages(replacement))
+            else:
+                await self._replace(replacement)
+            self._turn_active = False
+            self._interrupted = False
+            self._reset_stream_state()
+
+    async def _recover_stream(self, error: Exception) -> None:
+        """A broken process loses only its running turn: relaunch with backoff, resuming the
+        conversation, and fail the session only when every attempt does. Runs on the failed pump."""
+        LOG.error("The Claude CLI message stream failed", exc_info=error)
+        turn_active = self._turn_active
+        await self._deny_pending(_INTERRUPTED_MESSAGE)
+        self._fail_compaction(_INTERRUPTED_MESSAGE)
+        cause = error.cause if isinstance(error, claude_cli.ClaudeCliError) else "the agent stream broke"
+        await self._publish(agent_error(
+            f"{_INTERRUPTED_MESSAGE} ({cause}). Restoring the conversation; the workspace and its changes are kept."))
+        attempts = get_settings().agent_recovery_attempts
+        for attempt in range(attempts):
+            if attempt:
+                await asyncio.sleep(2 ** attempt)
+            try:
+                await self.recover()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOG.warning("Claude CLI relaunch attempt %s/%s failed", attempt + 1, attempts, exc_info=True)
+                continue
+            LOG.info("Claude CLI stream recovered after %s attempt(s)", attempt + 1)
+            await self._emit("agent.activity", {
+                "kind": "stream_recovered",
+                "description": "Reconnected and restored the conversation. Send a message to continue.",
+            })
+            if turn_active:
+                await self._publish(turn_result("error", subtype="stream_interrupted"))
+            return
+        await self._publish(session_status(STATUS_FAILED, RECOVERABLE_DETAIL))
+
+    def _reset_stream_state(self) -> None:
+        self._stream_ids.clear()
+        self._assistant_block_offsets.clear()
+        self._stream_message_id = None
+
+    def _fail_compaction(self, message: str) -> None:
+        if self._compaction is not None and not self._compaction.done():
+            self._compaction.set_exception(RuntimeError(message))
+
+    async def _connect(self, config: AgentConfig) -> claude_cli.ClaudeCli:
+        """Validate the checkout before every launch; a saved conversation is resumed, otherwise a
+        fresh id starts one (an unsaved id may already name a half-written transcript)."""
+        workspace = await asyncio.to_thread(self._validate_workspace)
+        if workspace != self._workspace:
+            raise RuntimeError("The session workspace changed during the conversation")
+        if not self._conversation_saved:
+            self._conversation_id = str(uuid4())
+        settings = get_settings()
+        rtk = shutil.which("rtk") if settings.agent_claude_rtk else None
+        cli = claude_cli.ClaudeCli(
+            self._arguments(config), cwd=self._workspace, env=claude_cli.environment(self._process_env()),
+            handler=self._control_handler(_shell_compressor(rtk) if rtk else None),
+            max_message_bytes=settings.agent_claude_max_message_bytes,
+        )
+        self._clis.add(cli)
+        hooks = {"PreToolUse": [{"matcher": "Bash", "hookCallbackIds": [_RTK_HOOK_ID]}]} if rtk else None
+        try:
+            await cli.start(hooks=hooks)
+        except BaseException:
+            self._clis.discard(cli)
+            raise
+        return cli
+
+    async def _replace(self, replacement: claude_cli.ClaudeCli) -> None:
+        previous = self._require_cli()
+        previous_pump = self._pump
+        self._cli = replacement
+        # A recovering pump replaces its own process: it ends by itself once recovery returns.
+        if previous_pump is not None and previous_pump is not asyncio.current_task():
+            previous_pump.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await previous_pump
+        self._pump = asyncio.create_task(self._pump_messages(replacement))
+        await previous.close()
+        self._clis.discard(previous)
+
+    def _require_cli(self) -> claude_cli.ClaudeCli:
+        if self._cli is None:
+            raise ApiException.conflict("The agent runtime is not running")
+        return self._cli
+
+    def _validate_workspace(self) -> Path:
+        return _validate_agent_workspace(self._workspace, self._branch)
+
+    def _process_env(self) -> dict[str, str]:
+        if self._config_dir is None:
+            raise RuntimeError("The Claude runtime state directory was not prepared")
+        # RTK's hook runs over the protocol, not from settings: keep its "no hook" notice out of tool output.
+        return {**self._environment, "RTK_SUPPRESS_HOOK_WARNING": "1",
+                **_claude_cli_credential_env(self._credential, str(self._config_dir))}
+
+    def _arguments(self, config: AgentConfig) -> list[str]:
+        settings = get_settings()
+        system_append = (
+            _CLAUDE_CONDUCT + "\n\n"
+            "The session shows the user every image a tool returns. To deliver an image "
+            "(created, rendered, converted or captured), save it as a PNG, JPEG, WebP or GIF "
+            "file and open it with the Read tool."
+        )
+        if self._instructions:
+            system_append += "\n\n" + self._instructions
+        arguments = [
+            claude_cli.executable(settings.agent_claude_cli), *_CLAUDE_CLI_STREAM,
+            "--include-partial-messages",
+            # Full access: every tool is approved over stdio without a pending request, and no
+            # project setting can re-enable the bash sandbox. Only the agent's questions reach the player.
+            "--permission-mode", "default", "--permission-prompt-tool", "stdio",
+            "--settings", json.dumps({"sandbox": {"enabled": False}}),
+            # Native project discovery; cwd and these settings are not a host filesystem boundary.
+            "--setting-sources=project,local",
+            "--mcp-config", json.dumps({"mcpServers": {"playwright": playwright_server()}}),
+            "--append-system-prompt", system_append,
+            f"--model={config.model}",
+            # `=` binds each value to its flag, so no value can be read as another flag.
+            f"--resume={self._conversation_id}" if self._conversation_saved else f"--session-id={self._conversation_id}",
+        ]
+        if config.effort:
+            arguments.append(f"--effort={config.effort}")
+        if settings.agent_claude_disallowed_tools:
+            arguments.append("--disallowedTools=" + ",".join(settings.agent_claude_disallowed_tools))
+        # Only a root native plugin is explicitly loaded; others follow the project settings.
+        if (self._workspace / ".claude-plugin" / "plugin.json").is_file():
+            arguments.append(f"--plugin-dir={self._workspace}")
+        return arguments
+
+    def _control_handler(self, compress: HookCallback | None) -> claude_cli.ControlHandler:
+        async def handle(request: dict[str, Any]) -> dict[str, Any]:
+            subtype = request.get("subtype")
+            if subtype == "can_use_tool":
+                return await self._can_use_tool(str(request.get("tool_name")), request.get("input") or {})
+            if subtype == "hook_callback" and request.get("callback_id") == _RTK_HOOK_ID and compress:
+                return dict(await compress(request.get("input") or {}, request.get("tool_use_id"), {"signal": None}))
+            raise RuntimeError(f"Unsupported Claude CLI request: {subtype}")
+
+        return handle
+
+    async def _deny_pending(self, message: str) -> None:
+        for request_id, pending in list(self._pending.items()):
+            if not pending.future.done():
+                pending.future.set_result({"decision": "deny", "message": message})
+                await self._emit(f"{pending.kind}.resolved", {
+                    "requestId": request_id, "decision": "deny", "message": message,
+                })
+            self._pending.pop(request_id, None)
+
+    async def _can_use_tool(self, tool_name: str, input_data: dict[str, Any]) -> dict[str, Any]:
+        """Only user decisions pause the session; tool execution is automatic."""
+        if tool_name != _QUESTION_TOOL:
+            return {"behavior": "allow", "updatedInput": input_data}
+        request_id = uuid4().hex
+        questions = list(input_data.get("questions") or [])
+        future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        self._pending[request_id] = _PendingRequest(_KIND_QUESTION, future)
+        try:
+            await self._publish(question_request(request_id, questions))
+            await self._ask(QuestionRequest(request_id, questions))
+            payload = await future
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            LOG.error("The %s request %s could not be answered", tool_name, request_id, exc_info=error)
+            return {"behavior": "deny", "message": _DENIED_MESSAGE}
+        finally:
+            self._pending.pop(request_id, None)
+        if payload.get("decision") == "deny":
+            return {"behavior": "deny", "message": payload.get("message") or _DENIED_MESSAGE}
+        updated: dict[str, Any] = {
+            "questions": input_data.get("questions", []),
+            "answers": {key: ", ".join(value) if isinstance(value, list) else value
+                        for key, value in (payload.get("answers") or {}).items()},
+        }
+        if payload.get("response"):
+            updated["response"] = payload["response"]
+        return {"behavior": "allow", "updatedInput": updated}
+
+    async def resolve(self, request_id: str, payload: dict[str, Any]) -> None:
+        """Answers one parked request. Unknown or already answered ids are indistinguishable on
+        purpose — both mean there is nothing left to answer."""
+        pending = self._pending.get(request_id)
+        if pending is None or pending.future.done():
+            raise ApiException.not_found("Unknown or already answered request")
+        pending.future.set_result(payload)
+        if pending.kind == _KIND_QUESTION:
+            await self._publish(question_resolved(request_id, payload.get("answers") or {}))
+        else:
+            await self._publish(permission_resolved(request_id, payload.get("decision") or "allow"))
+
+    async def _publish(self, event: AgentEvent) -> None:
+        await self._emit(event["type"], event["data"])
+
+    async def _pump_messages(self, cli: claude_cli.ClaudeCli) -> None:
+        """Translates the CLI's stream-json messages into domain events until the process ends."""
+        try:
+            async for message in cli.messages():
+                await self._translate(message)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            # A replacement first launches its successor, then cancels this old pump. Never let
+            # an obsolete process fail a ready session after the successor has taken over.
+            if cli is self._cli:
+                await self._recover_stream(error)
+
+    async def _translate(self, message: dict[str, Any]) -> None:
+        kind = message.get("type")
+        if self._awaiting_first_event_at is not None:
+            LOG.info("Claude CLI first event received in %.0f ms",
+                     (time.perf_counter() - self._awaiting_first_event_at) * 1000)
+            self._awaiting_first_event_at = None
+        if kind == "rate_limit_event":
+            await self._on_rate_limit(message.get("rate_limit_info") or {})
+        elif self._compaction is not None:
+            self._on_compaction_message(message)
+        elif kind == "stream_event":
+            await self._on_stream_event(message)
+        elif kind == "assistant":
+            await self._on_assistant_message(message)
+        elif kind == "user":
+            await self._on_user_message(message)
+        elif kind == "result":
+            await self._on_result_message(message)
+        elif kind == "system" and message.get("subtype") in _TASK_SUBTYPES:
+            event = _claude_task_update(self._task_tools, str(message.get("subtype")), message)
+            if event is not None:
+                await self._publish(event)
+        elif kind == "system":
+            # Whitelist useful user-facing metadata; never publish the raw initialization payload.
+            data = {key: message[key] for key in
+                    ("description", "summary", "status", "task_id", "tool_use_id") if key in message}
+            await self._emit("agent.activity", {"kind": message.get("subtype"), **data})
+        elif kind == "conversation_reset":
+            self._context_input = None
+            self._context_output = 0
+            await self._emit("session.usage", {"context": None})
+            self._task_tools.clear()
+            self._reset_stream_state()
+            await self._emit("agent.activity", {
+                "kind": "conversation_reset", "description": "The provider cleared its conversation context.",
+            })
+
+    def _on_compaction_message(self, message: dict[str, Any]) -> None:
+        """`/compact` reports a failure as a status message and always ends with a result."""
+        if message.get("type") == "system" and message.get("compact_result") == "failed":
+            self._compaction_error = str(message.get("compact_error") or "Compaction failed")
+        elif message.get("type") == "result" and self._compaction is not None and not self._compaction.done():
+            if self._compaction_error or message.get("is_error"):
+                self._compaction.set_exception(RuntimeError(self._compaction_error or "Compaction failed"))
+            else:
+                self._compaction.set_result(None)
+
+    async def _on_rate_limit(self, info: dict[str, Any]) -> None:
+        from mic_sessions.shared import claude_usage
+        reported_at = time.time()
+        utilization = info.get("utilization")
+        window_type = info.get("rateLimitType")
+        await claude_usage.remember(self._credential.connection_id, self._credential.token, window_type, {
+            # A rejected window is exhausted even when the CLI omits its utilization.
+            "percent": utilization * 100 if isinstance(utilization, (int, float))
+            else 100 if info.get("status") == "rejected" else None,
+            "window": window_type, "resetsAt": info.get("resetsAt"),
+            "status": info.get("status"), "updatedAt": reported_at,
+        })
+        # Every plan window from the anthropic-ratelimit-unified-* headers; utilization is a fraction.
+        windows = info.get("unifiedWindows")
+        for name in ("five_hour", "seven_day"):
+            window = windows.get(name) if isinstance(windows, dict) else None
+            value = window.get("utilization") if isinstance(window, dict) else None
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+                await claude_usage.remember(self._credential.connection_id, self._credential.token, name, {
+                    "percent": max(0, min(100, value * 100)), "window": name,
+                    "resetsAt": window.get("resetsAt"), "updatedAt": reported_at,
+                })
+        await self._refresh_quota()
+
+    async def _on_stream_event(self, message: dict[str, Any]) -> None:
+        raw = message.get("event") or {}
+        event_type = raw.get("type")
+        parent = message.get("parent_tool_use_id") or "root"
+        self._stream_message_id = self._stream_ids.get(parent)
+        if parent == "root" and event_type == "message_start":
+            info = raw.get("message") or {}
+            tokens = info.get("usage") or {}
+            self._context_model = info.get("model")
+            self._context_input = sum(tokens.get(key, 0) or 0 for key in
+                                      ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")) if tokens else None
+            self._context_output = tokens.get("output_tokens", 0) or 0
+            await self._emit_context_usage()
+        if parent == "root" and event_type == "message_delta":
+            self._context_output = (raw.get("usage") or {}).get("output_tokens", self._context_output)
+            await self._emit_context_usage()
+        if event_type == "message_start":
+            self._stream_message_id = ((raw.get("message") or {}).get("id")) or uuid4().hex
+            self._stream_ids[parent] = self._stream_message_id
+            self._assistant_block_offsets[(parent, self._stream_message_id)] = 0
+            return
+        if event_type != "content_block_delta":
+            return
+        delta = raw.get("delta") or {}
+        if self._stream_message_id is None:
+            self._stream_message_id = uuid4().hex
+        self._stream_ids[parent] = self._stream_message_id
+        message_id = f"{self._stream_message_id}:{raw.get('index', 0)}"
+        if delta.get("text"):
+            await self._publish(_with_parent(assistant_delta(message_id, delta["text"]), parent))
+        elif delta.get("thinking"):
+            await self._publish(_with_parent(thinking_delta(message_id, delta["thinking"]), parent))
+
+    async def _emit_context_usage(self) -> None:
+        if self._context_input is None:
+            return
+        used = self._context_input + self._context_output
+        window = self._context_window
+        await self._emit("session.usage", {"context": {
+            "percent": used / window * 100 if window else None,
+            "usedTokens": used, "limitTokens": window, "updatedAt": time.time(),
+        }})
+
+    async def _on_assistant_message(self, message: dict[str, Any]) -> None:
+        body = message.get("message") or {}
+        parent = message.get("parent_tool_use_id") or "root"
+        error = message.get("error")
+        # Reuse the stream id so the final block replaces its provisional deltas in the transcript.
+        message_id = self._stream_ids.get(parent) or body.get("id") or uuid4().hex
+        block_key = (parent, message_id)
+        # The CLI can deliver each block of one message as a separate assistant message.
+        first_index = self._assistant_block_offsets.get(block_key, 0)
+        # Synthetic messages (provider errors, interruptions) carry zeroed usage: never let them
+        # overwrite the context measured by the last real model response.
+        tokens = body.get("usage") if parent == "root" and not error else None
+        input_tokens = sum(tokens.get(key, 0) or 0 for key in
+                           ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")) if tokens else 0
+        if tokens and body.get("model") != "<synthetic>" and input_tokens > 0:
+            self._context_input = input_tokens
+            self._context_output = tokens.get("output_tokens", self._context_output) or 0
+            await self._emit_context_usage()
+        content = body.get("content") if isinstance(body.get("content"), list) else []
+        for index, block in enumerate(content, start=first_index):
+            block_id = f"{message_id}:{index}"
+            block_type = block.get("type") if isinstance(block, dict) else None
+            if block_type == "text":
+                # Claude emits this sentinel when filtering a contentless assistant message.
+                text = str(block.get("text") or "")
+                await self._publish(_with_parent(assistant_message(
+                    block_id, "" if text.strip() in {"[No message content]", "<no message>"} else text), parent))
+            elif block_type == "thinking":
+                await self._publish(_with_parent(thinking_message(block_id, str(block.get("thinking") or "")), parent))
+            elif block_type == "tool_use":
+                name, input_data = str(block.get("name")), block.get("input") or {}
+                await self._publish(_with_parent(
+                    tool_use(str(block.get("id")), name, _tool_title(name, input_data), input_data), parent))
+            elif block_type == "server_tool_use":
+                name = {"web_search": "WebSearch", "web_fetch": "WebFetch"}.get(str(block.get("name")), str(block.get("name")))
+                input_data = block.get("input") or {}
+                await self._publish(_with_parent(
+                    tool_use(str(block.get("id")), name, _tool_title(name, input_data), input_data), parent))
+            elif block_type == "advisor_tool_result":
+                await self._publish(_with_parent(
+                    tool_result(str(block.get("tool_use_id")), False, _result_summary(block.get("content"))), parent))
+        self._assistant_block_offsets[block_key] = first_index + len(content)
+        self._stream_message_id = None
+        if error:
+            await self._publish(agent_error(f"Provider error: {error}"))
+
+    async def _on_user_message(self, message: dict[str, Any]) -> None:
+        content = (message.get("message") or {}).get("content")
+        if not isinstance(content, list):
+            return
+        parent = message.get("parent_tool_use_id")
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                images = await self._result_images(block.get("content"))
+                await self._publish(_with_parent(tool_result(str(block.get("tool_use_id")), bool(block.get("is_error")),
+                                                             _result_summary(block.get("content")), images), parent))
+
+    async def _result_images(self, content: Any) -> list[Image]:
+        """Images a tool returned are kept for the player; their base64 never reaches the event log."""
+        sources = [block["source"] for block in content if isinstance(block, dict) and block.get("type") == "image"
+                   and isinstance(block.get("source"), dict) and block["source"].get("type") == "base64"
+                   and isinstance(block["source"].get("data"), str)] if isinstance(content, list) else []
+        if not sources:
+            return []
+        stored = await asyncio.to_thread(lambda: [
+            session_images.save_encoded(self._workspace, source["data"]) for source in sources])
+        return [image for image in stored if image is not None]
+
+    async def _on_result_message(self, message: dict[str, Any]) -> None:
+        """Only `terminalReason` is required by the contract; every other field is best effort."""
+        self._conversation_saved = True
+        await self._refresh_quota()
+        model_usage = (message.get("modelUsage") or {}).get(self._context_model) or {}
+        window = model_usage.get("contextWindow")
+        if isinstance(window, int) and window > 0:
+            self._context_window = window
+        await self._emit_context_usage()
+        await self._deny_pending("The turn ended")
+        self._turn_active = False
+        self._reset_stream_state()
+        is_error = bool(message.get("is_error"))
+        # A stopped turn ends as an error with internal diagnostics only; the footer reports it.
+        errors = [error for error in message.get("errors") or [] if not str(error).startswith("[ede_diagnostic]")]
+        if is_error and errors and not self._interrupted:
+            await self._publish(agent_error(_result_summary("\n".join(map(str, errors)))))
+        await self._publish(turn_result(
+            terminal_reason="interrupted" if self._interrupted else "error" if is_error else "completed",
+            subtype=message.get("subtype"),
+            duration_ms=message.get("duration_ms"),
+            cost_usd=message.get("total_cost_usd"),
+            usage=message.get("usage"),
+        ))
+
+
+_CLAUDE_CLI_STREAM = ("--print", "--verbose", "--output-format", "stream-json", "--input-format", "stream-json")
+_RTK_HOOK_ID = "mooi_rtk"
+
+
+def _claude_cli_credential_env(credential: Credential, config_dir: str) -> dict[str, str]:
+    """The player's token as the only credential the CLI can use. Never log the returned dict."""
+    return {
+        "CLAUDE_CODE_OAUTH_TOKEN": credential.token,
+        "CLAUDE_CONFIG_DIR": config_dir,
+        # Prevent inherited alternative auth from overriding this session's token.
+        "ANTHROPIC_API_KEY": "",
+        "ANTHROPIC_AUTH_TOKEN": "",
+        "CLAUDE_CODE_USE_BEDROCK": "0",
+        "CLAUDE_CODE_USE_VERTEX": "0",
+        "CLAUDE_CODE_USE_FOUNDRY": "0",
+    }
+
+
 CODEX_CAPABILITIES = AgentCapabilities(streaming=True, thinking=True, questions=True, interrupt=True, images=True,
                                        asides=True)
 
 # Full access, like the Claude adapter: Codex never asks for approvals and runs unsandboxed
 # inside the session's own clone. Only the agent's own questions reach the player.
+# Codex approves nothing per call (`approvalPolicy: never`), so its file rule is instruction only.
+_CODEX_CONDUCT = conduct_instructions(edit_tools="apply_patch")
 _CODEX_ACCESS = {"approvalPolicy": "never", "sandbox": "danger-full-access"}
 _CODEX_FILE_TOOLS = {"add": "Write", "delete": "Edit", "update": "Edit"}
 # Codex collab calls other than `spawnAgent` are the main agent managing its delegates: steps.
@@ -1376,7 +2198,14 @@ def _codex_file_steps(item: dict[str, Any]) -> list[tuple[str, str, dict[str, An
 
 
 class CodexAgentRuntime:
-    """Codex conversation adapter; vendor objects never cross the event contract."""
+    """Codex conversation adapter; vendor objects never cross the event contract.
+
+    Like the Codex app, one session keeps one `codex app-server` and its loaded thread across turns,
+    so a message starts its turn at once. The connection is replaced only when it broke or when another
+    connection of the same account rotated the shared credential since it connected. It is per session,
+    never per account: the SDK answers a pending question on its single reader thread, which must
+    only ever block the conversation that asked.
+    """
 
     capabilities: ClassVar[AgentCapabilities] = CODEX_CAPABILITIES
     _catalog: ClassVar[ContextVar[dict[str, Any] | None]] = ContextVar('codex_catalog', default=None)
@@ -1415,7 +2244,13 @@ class CodexAgentRuntime:
         self._environment = dict(environment or {})
         self._account = None
         self._client = None
+        # The credential the connection was opened with, and whether it has loaded the thread.
+        self._client_token = None
+        self._thread_loaded = False
+        self._connect_lock = asyncio.Lock()
         self._thread_id = None
+        # The thread's rollout file as the app-server reported it, or as found by `trace_sources`.
+        self._thread_path: str | None = None
         self._turn_id = None
         self._task = None
         self._pending = {}
@@ -1430,9 +2265,8 @@ class CodexAgentRuntime:
         await self._emit(event["type"], event["data"])
 
     def _thread_params(self) -> dict[str, Any]:
-        params = {"cwd": str(self._workspace), "model": self._config.model, **_CODEX_ACCESS}
-        if self._instructions:
-            params["developerInstructions"] = self._instructions
+        params = {"cwd": str(self._workspace), "model": self._config.model, **_CODEX_ACCESS,
+                  "developerInstructions": "\n\n".join(filter(None, [_CODEX_CONDUCT, self._instructions]))}
         if self._environment:
             # The account's app-server is shared by sessions: per-thread overrides scope the variables
             # to this conversation's shell commands, on top of the server's `inherit="none"` policy.
@@ -1451,28 +2285,73 @@ class CodexAgentRuntime:
                 "percent": 0, "usedTokens": 0, "limitTokens": window, "updatedAt": time.time(),
             }})
         try:
-            async with asyncio.timeout(15):
-                async with codex.connected(self._account, self._workspace) as client:
-                    snapshot = await codex.quota(self._account, client)
-                    await self._emit("session.usage", {"quota": snapshot})
+            # The connection the first turn will reuse, opened while the session provisions.
+            async with asyncio.timeout(30):
+                client = await self._connection()
+                snapshot = await codex.quota(self._account, client)
+            await self._emit("session.usage", {"quota": snapshot})
         except Exception:
             LOG.debug("Initial Codex account usage is unavailable")
             await self._emit("session.usage", {"quota": {}})
 
-    async def refresh_usage(self):
+    async def _connection(self):
+        """The session's app-server, opened on first use and replaced when broken or stale."""
         from mic_sessions.shared import codex
-        account = self._account
+        async with self._connect_lock:
+            if self._closing or self._account is None:
+                raise ApiException.conflict("Codex session is closed")
+            if self._client is not None and not (self._client.alive and self._account.current(self._client_token)):
+                await self._disconnect()
+            if self._client is None:
+                self._client, self._client_token = await codex.open_client(self._account, self._workspace, self._answer)
+                self._thread_loaded = False
+            return self._client
+
+    async def _disconnect(self):
+        from mic_sessions.shared import codex
+        client, self._client, self._thread_loaded = self._client, None, False
+        if client is not None and self._account is not None:
+            try:
+                await codex.close_client(self._account, client)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOG.debug("The Codex app-server did not close cleanly", exc_info=True)
+
+    async def _load_thread(self, client):
+        params = self._thread_params()
+        if self._thread_id is None:
+            thread = (await client.call("thread_start", params)).thread
+            self._thread_id = thread.id
+            self._thread_path = getattr(thread, "path", None)
+        elif not self._thread_loaded:
+            await client.call("thread_resume", self._thread_id, params)
+        self._thread_loaded = True
+
+    def trace_sources(self) -> Sequence[TraceSource]:
+        """The thread's rollout file in the account's `CODEX_HOME`; `[]` until the thread exists."""
+        if self._account is None or self._thread_id is None:
+            return []
+        path = codex_rollout(self._account.home, self._thread_id, self._thread_path)
+        if path is None:
+            return []
+        self._thread_path = str(path)
+        return [TraceSource("codex", path)]
+
+    async def refresh_usage(self):
+        """Reads the account limits on the live connection; never starts an app-server just for them."""
+        from mic_sessions.shared import codex
+        account, client = self._account, self._client
         if self._closing or account is None:
             return
-        if account.lock.locked() or time.monotonic() - account.quota_checked_at < 60:
+        if client is None or not client.alive:
             if account.quota_snapshot:
                 await self._emit("session.usage", {"quota": account.quota_snapshot})
             return
         async with asyncio.timeout(15):
-            async with codex.connected(account, self._workspace) as client:
-                snapshot = await codex.quota(account, client)
-                if snapshot:
-                    await self._emit("session.usage", {"quota": snapshot})
+            snapshot = await codex.quota(account, client)
+        if snapshot:
+            await self._emit("session.usage", {"quota": snapshot})
 
     async def send(self, text, images=()):
         if self._closing or self._account is None:
@@ -1563,7 +2442,7 @@ class CodexAgentRuntime:
         elif self._task and not self._task.done():
             self._task.cancel()
 
-    async def compact(self):
+    async def compact(self, instructions: str | None = None):
         from mic_sessions.shared import codex
         if self._closing or self._account is None:
             raise ApiException.conflict("Codex session is closed")
@@ -1571,24 +2450,28 @@ class CodexAgentRuntime:
             raise ApiException.conflict("There is no conversation to compact yet")
         if self._task and not self._task.done():
             raise ApiException.conflict("A Codex turn is still running")
-        async with codex.connected(self._account, self._workspace, self._answer) as client:
-            self._client = client
-            try:
-                await client.call("thread_resume", self._thread_id, self._thread_params())
-                tokens = await client.compact(self._thread_id)
-                last = (tokens or {}).get("last") or {}
-                window = (tokens or {}).get("modelContextWindow")
-                used = last.get("totalTokens")
-                await self._emit("session.usage", {"context": {
-                    "percent": used / window * 100 if used is not None and window else None,
-                    "usedTokens": used, "limitTokens": window, "updatedAt": time.time(),
-                }})
-                try:
-                    await self._emit("session.usage", {"quota": await codex.quota(self._account, client, refresh=True)})
-                except Exception:
-                    LOG.debug("Codex quota is unavailable after compaction")
-            finally:
-                self._client = None
+        client = await self._connection()
+        try:
+            await self._load_thread(client)
+            tokens = await client.compact(self._thread_id, instructions)
+        except asyncio.CancelledError:
+            await self._disconnect()
+            raise
+        except Exception:
+            if not client.alive:
+                await self._disconnect()
+            raise
+        last = (tokens or {}).get("last") or {}
+        window = (tokens or {}).get("modelContextWindow")
+        used = last.get("totalTokens")
+        await self._emit("session.usage", {"context": {
+            "percent": used / window * 100 if used is not None and window else None,
+            "usedTokens": used, "limitTokens": window, "updatedAt": time.time(),
+        }})
+        try:
+            await self._emit("session.usage", {"quota": await codex.quota(self._account, client, refresh=True)})
+        except Exception:
+            LOG.debug("Codex quota is unavailable after compaction")
 
     async def aside(self, question):
         """Answers in an ephemeral, read-only fork of the thread on its own connection, beside any turn."""
@@ -1611,14 +2494,16 @@ class CodexAgentRuntime:
                         raise RuntimeError("Codex could not answer the side question")
 
     async def recover(self):
-        """Each turn opens its own connection, so a broken one already ended its turn: only the
-        workspace and the account need to be in place again."""
+        """A broken connection already ended its turn: drop it so the next turn reconnects and resumes
+        the thread, with the workspace and the account in place again."""
         from mic_sessions.shared import codex
         if self._closing:
             raise ApiException.conflict("Codex session is closed")
         await asyncio.to_thread(_validate_agent_workspace, self._workspace, self._branch)
         if self._account is None:
             self._account = codex.acquire(self._credential)
+        async with self._connect_lock:
+            await self._disconnect()
 
     async def close(self):
         from mic_sessions.shared import codex
@@ -1627,6 +2512,8 @@ class CodexAgentRuntime:
         if self._task and not self._task.done():
             self._task.cancel()
             await asyncio.gather(self._task, return_exceptions=True)
+        async with self._connect_lock:
+            await self._disconnect()
         if self._account:
             codex.release(self._account)
             self._account = None
@@ -1637,50 +2524,68 @@ class CodexAgentRuntime:
         started = time.monotonic()
         usage = None
         try:
-            async with codex.connected(self._account, self._workspace, self._answer) as client:
-                self._client = client
-                params = self._thread_params()
-                thread = (await client.call("thread_resume", self._thread_id, params) if self._thread_id
-                          else await client.call("thread_start", params))
-                self._thread_id = thread.thread.id
-                turn = await client.call("turn_start", self._thread_id, items,
-                                         {"model": self._config.model, "effort": self._config.effort})
-                self._turn_id = turn.turn.id
-                if self._interrupted:
-                    await client.call("turn_interrupt", self._thread_id, self._turn_id)
-                async for method, payload in client.notifications(self._turn_id):
-                    if method == "turn/completed":
-                        status = payload["turn"]["status"]
-                        terminal = "completed" if status == "completed" else "interrupted" if status == "interrupted" else "error"
-                        if terminal == "error":
-                            await self._publish(agent_error("Codex could not complete the turn. Check your account and selected model."))
-                    elif method == "thread/tokenUsage/updated":
-                        tokens = payload.get("tokenUsage") or {}
-                        usage = tokens.get("last")
-                        window = tokens.get("modelContextWindow")
-                        used = (usage or {}).get("totalTokens")
-                        await self._emit("session.usage", {"context": {
-                            "percent": used / window * 100 if used is not None and window else None,
-                            "usedTokens": used, "limitTokens": window, "updatedAt": time.time(),
-                        }})
-                    else:
-                        await self._event(method, payload)
-                # Best effort, once per turn; shared account cache bounds short-turn traffic.
-                try:
-                    quota = await codex.quota(self._account, client)
-                    await self._emit("session.usage", {"quota": quota})
-                except Exception:
-                    LOG.debug("Codex quota is unavailable")
+            client = await self._start_turn(items)
+            if self._interrupted:
+                await client.call("turn_interrupt", self._thread_id, self._turn_id)
+            async for method, payload in client.notifications(self._turn_id):
+                if method == "turn/completed":
+                    status = payload["turn"]["status"]
+                    terminal = "completed" if status == "completed" else "interrupted" if status == "interrupted" else "error"
+                    if terminal == "error":
+                        await self._publish(agent_error("Codex could not complete the turn. Check your account and selected model."))
+                elif method == "thread/tokenUsage/updated":
+                    tokens = payload.get("tokenUsage") or {}
+                    usage = tokens.get("last")
+                    window = tokens.get("modelContextWindow")
+                    used = (usage or {}).get("totalTokens")
+                    await self._emit("session.usage", {"context": {
+                        "percent": used / window * 100 if used is not None and window else None,
+                        "usedTokens": used, "limitTokens": window, "updatedAt": time.time(),
+                    }})
+                else:
+                    await self._event(method, payload)
+            # Best effort, once per turn; shared account cache bounds short-turn traffic.
+            try:
+                quota = await codex.quota(self._account, client)
+                await self._emit("session.usage", {"quota": quota})
+            except Exception:
+                LOG.debug("Codex quota is unavailable")
+            await codex.persist(self._account)
         except asyncio.CancelledError:
             terminal = "interrupted"
+            # Its reader may still be blocked on this turn: never reuse the connection.
+            await self._disconnect()
         except Exception:
+            if self._client is not None and not self._client.alive:
+                await self._disconnect()
             await self._publish(agent_error("Codex could not complete the turn. Check your account connection and try again."))
         finally:
-            self._client = self._turn_id = None
+            self._turn_id = None
             await self._deny_pending()
             if not self._closing:
                 await self._publish(turn_result("interrupted" if self._interrupted else terminal,
                                                duration_ms=int((time.monotonic() - started) * 1000), usage=usage))
+
+    async def _start_turn(self, items):
+        """Starts the turn on the session's connection. A reused connection that fails before the turn
+        starts is replaced once: a dead app-server never costs the user's message."""
+        for attempt in range(2):
+            reused = self._client is not None
+            client = await self._connection()
+            try:
+                await self._load_thread(client)
+                turn = await client.call("turn_start", self._thread_id, items,
+                                         {"model": self._config.model, "effort": self._config.effort})
+            except Exception:
+                async with self._connect_lock:
+                    await self._disconnect()
+                if not reused or attempt:
+                    raise
+                LOG.info("Codex connection was unusable; reconnecting for this turn")
+                continue
+            self._turn_id = turn.turn.id
+            return client
+        raise RuntimeError("unreachable")
 
     async def _event(self, method, payload):
         item_id = payload.get("itemId", "")
@@ -1817,21 +2722,55 @@ class CodexAgentRuntime:
 
 
 @dataclass(frozen=True)
-class ProviderDescriptor:
+class AdapterDescriptor:
+    """One implementation of a provider: the integration technology behind the same contract."""
+
     id: str
     label: str
-    capabilities: AgentCapabilities
     runtime_class: type[AgentRuntime]
 
-    async def prepare(self, caller, connection_id: str, refresh: bool = False) -> None:
-        loader = getattr(self.runtime_class, "load_configuration", None)
+    @property
+    def capabilities(self) -> AgentCapabilities:
+        return self.runtime_class.capabilities
+
+
+@dataclass(frozen=True)
+class ProviderDescriptor:
+    """A provider and its adapters; the first adapter is the default. Accounts, model defaults and
+    usage belong to the provider, so every adapter of one provider shares them."""
+
+    id: str
+    label: str
+    adapters: tuple[AdapterDescriptor, ...]
+
+    def adapter(self, adapter_id: str | None = None) -> AdapterDescriptor:
+        if not adapter_id:
+            return self.adapters[0]
+        adapter = next((entry for entry in self.adapters if entry.id == adapter_id), None)
+        if adapter is None:
+            raise ApiException.bad_request("Unknown agent adapter")
+        return adapter
+
+    def default_adapter(self, configured: str | None) -> AdapterDescriptor:
+        """The administrator's default adapter when this provider still offers it, else the first one."""
+        return next((entry for entry in self.adapters if entry.id == configured), self.adapters[0])
+
+    async def prepare(self, caller, connection_id: str, refresh: bool = False,
+                      adapter: str | None = None) -> AdapterDescriptor:
+        """Loads the catalog of the requested adapter, or of the platform's default one, and returns
+        the adapter it prepared. The credential carries the platform defaults, so resolving the default
+        costs nothing beyond the fetch the catalog needs anyway."""
+        requested = self.adapter(adapter) if adapter else None
+        from mic_sessions.shared.mooi import fetch_agent_credential
+        credential = await fetch_agent_credential(caller, connection_id)
+        if credential.provider != self.id:
+            raise ApiException.bad_request("The selected account belongs to another provider")
+        prepared = requested or self.default_adapter(credential.session_adapter)
+        runtime_class = prepared.runtime_class
+        loader = getattr(runtime_class, "load_configuration", None)
         if loader:
-            from mic_sessions.shared.mooi import fetch_agent_credential
-            credential = await fetch_agent_credential(caller, connection_id)
-            if credential.provider != self.id:
-                raise ApiException.bad_request("The selected account belongs to another provider")
             await loader(credential, refresh=refresh)
-            catalog = self.configuration()
+            catalog = runtime_class.configuration()
             selected = (credential.session_model if credential.session_model and any(
                 model["id"] == credential.session_model for model in catalog["models"]
             ) else "" if credential.session_model else catalog["defaultModel"])
@@ -1840,19 +2779,25 @@ class ProviderDescriptor:
             preferred_effort = next((value for value in (
                 credential.session_effort, entry.get("defaultEffort") if entry else None,
                 catalog["defaultEffort"], *efforts) if value and value in efforts), None)
-            self.runtime_class._catalog.set({**catalog, "providerDefaultModel": catalog["defaultModel"],
-                                             "defaultModel": selected, "defaultEffort": preferred_effort})
+            runtime_class._catalog.set({**catalog, "providerDefaultModel": catalog["defaultModel"],
+                                        "defaultModel": selected, "defaultEffort": preferred_effort})
+        return prepared
 
-    def configuration(self) -> dict[str, Any]:
-        return self.runtime_class.configuration()
+    def configuration(self, adapter: str | None = None) -> dict[str, Any]:
+        selected = self.adapter(adapter)
+        return {**selected.runtime_class.configuration(), "adapter": selected.id,
+                "adapters": [{"id": entry.id, "label": entry.label} for entry in self.adapters]}
 
-    def configure(self, model: str | None, effort: str | None) -> AgentConfig:
-        return self.runtime_class.configure(model, effort)
+    def configure(self, model: str | None, effort: str | None, adapter: str | None = None) -> AgentConfig:
+        return self.adapter(adapter).runtime_class.configure(model, effort)
 
 
 PROVIDERS: dict[str, ProviderDescriptor] = {
-    "codex": ProviderDescriptor("codex", "Codex", CODEX_CAPABILITIES, CodexAgentRuntime),
-    "claude": ProviderDescriptor("claude", "Claude", CLAUDE_CAPABILITIES, ClaudeAgentRuntime),
+    "codex": ProviderDescriptor("codex", "Codex", (AdapterDescriptor("sdk", "Codex SDK", CodexAgentRuntime),)),
+    "claude": ProviderDescriptor("claude", "Claude", (
+        AdapterDescriptor("sdk", "Claude SDK", ClaudeAgentRuntime),
+        AdapterDescriptor("cli", "Claude CLI", ClaudeCliAgentRuntime),
+    )),
 }
 
 
@@ -1872,8 +2817,9 @@ def create_runtime(
     ask: Ask,
     config: AgentConfig,
     *,
+    adapter: str | None = None,
     instructions: str = "",
     environment: Mapping[str, str] | None = None,
 ) -> AgentRuntime:
-    return describe(provider).runtime_class(credential, workspace, branch, emit, ask, config,
-                                            instructions=instructions, environment=environment)
+    return describe(provider).adapter(adapter).runtime_class(credential, workspace, branch, emit, ask, config,
+                                                             instructions=instructions, environment=environment)

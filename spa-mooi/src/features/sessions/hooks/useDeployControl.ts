@@ -6,11 +6,12 @@ import type { Session } from '@/features/sessions/types/Session';
 import { useSessionsStore } from '@/stores/sessionsStore';
 
 /**
- * Deploy the session's root Docker Compose as a live preview, and stop it again. Without a setup
- * (no root Compose file, or a failed start), Deploy clears the chat and the agent sets the deployment
- * up there, ending with a test run; the console stays hidden while it prepares. Otherwise Deploy runs
- * directly. While the workspace holds a root Compose file, the setup can be changed with the user's
- * request; only while the deployment is stopped. Null until the session reports a deployment.
+ * Deploy the session's root Docker Compose as a live preview, and stop it again. Until the project's
+ * setup passed its test through the agent (a root Compose file alone does not count), with no root
+ * Compose file, or after a failed start, Deploy clears the chat and the agent sets the deployment up
+ * there, ending with a test run; the console stays hidden while it prepares. Otherwise Deploy runs
+ * directly, and the setup can be changed with the user's request; only while the deployment is
+ * stopped. Null until the session reports a deployment.
  */
 export const useDeployControl = (session: Session, disabled: boolean): DeployControl | null => {
   const { deployment, busy, error, start, stop, changeSetup } = useDeployment(session.id);

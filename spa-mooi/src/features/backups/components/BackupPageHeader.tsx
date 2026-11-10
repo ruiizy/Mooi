@@ -41,7 +41,7 @@ export const BackupPageHeader = ({ project, stage, active, configured, deployedR
     <div className="shrink-0 border-b border-line bg-surface">
       <div className="flex items-center gap-1.5 py-2 pr-2 pl-1.5 sm:gap-3 sm:px-5 sm:py-2.5">
         <Link to={ROUTES.backups} aria-label="Back to backups" title="Back to backups"
-          className="flex size-10 shrink-0 items-center justify-center rounded-[10px] text-ink-muted transition hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand">
+          className="flex size-10 shrink-0 items-center justify-center rounded-control text-ink-muted transition hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand">
           <ChevronLeft className="size-4.5" />
         </Link>
 
@@ -71,7 +71,7 @@ export const BackupPageHeader = ({ project, stage, active, configured, deployedR
           <ActionsMenu label="More backup actions">
             {(dismiss) => <>
               <Link to={deploymentPath(project.id)} onClick={dismiss} role="menuitem"
-                className="flex h-11 w-full items-center gap-2.5 rounded-[10px] px-3 text-left text-sm font-bold text-ink-muted transition hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-brand">
+                className="flex h-11 w-full items-center gap-2.5 rounded-control px-3 text-left text-sm font-bold text-ink-muted transition hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-brand">
                 <Rocket className="size-4 shrink-0" /><span className="truncate">Production deployment</span></Link>
               <div className="my-1 h-px bg-line" />
               <MenuAction icon={Trash2} label="Delete configuration" tone="danger" disabled={!configured || running}

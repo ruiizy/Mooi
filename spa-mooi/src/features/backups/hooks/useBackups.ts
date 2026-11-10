@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
 import { fetchBackups } from '@/features/backups/api/backupHistoryApi';
 import type { Backup } from '@/features/backups/types/Backup';
+import { useLiveStore } from '@/stores/liveStore';
 
-/** Every recorded backup across projects, newest first, refreshed every 15 seconds while visible. */
+/** Every recorded backup across projects, newest first, reloaded whenever the live channel reports an operation ended. */
 export const useBackups = () => {
+  const finished = useLiveStore((state) => state.finished.backup);
   const [backups, setBackups] = useState<Backup[]>([]);
   const [pages, setPages] = useState(1);
   const [hasMore, setHasMore] = useState(false);
@@ -25,9 +27,8 @@ export const useBackups = () => {
       .finally(() => { if (active) setLoading(false); });
     setLoading(true);
     void refresh();
-    const timer = window.setInterval(() => { if (document.visibilityState === 'visible') void refresh(); }, 15000);
-    return () => { active = false; window.clearInterval(timer); };
-  }, [pages, revision]);
+    return () => { active = false; };
+  }, [pages, revision, finished]);
 
   const reload = useCallback(() => setRevision((value) => value + 1), []);
   const loadMore = useCallback(() => setPages((value) => value + 1), []);

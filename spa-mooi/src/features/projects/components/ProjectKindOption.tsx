@@ -26,7 +26,7 @@ export const ProjectKindOption = ({
 }: ProjectKindOptionProps) => (
   <label
     className={cn(
-      'relative flex cursor-pointer flex-col gap-3 rounded-[14px] border p-4 transition duration-200 has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-brand',
+      'relative flex cursor-pointer flex-col gap-3 rounded-card border p-4 transition duration-200 has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-brand',
       checked ? 'border-brand bg-brand-soft/60 ring-1 ring-brand' : 'border-line hover:border-line-strong hover:bg-surface-2',
     )}
   >
@@ -35,7 +35,7 @@ export const ProjectKindOption = ({
     <span className="flex items-start justify-between gap-3">
       <span
         className={cn(
-          'flex size-10 shrink-0 items-center justify-center rounded-[10px] transition',
+          'flex size-10 shrink-0 items-center justify-center rounded-control transition',
           checked ? 'bg-brand text-brand-ink' : 'bg-surface-2 text-ink-muted',
         )}
       >

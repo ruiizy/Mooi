@@ -42,7 +42,7 @@ export const ProductionOverviewPanel = ({ project, overview, error, onRetry, sta
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto flex w-full max-w-6xl flex-col gap-5 px-4 py-6 sm:px-8 lg:px-10 lg:py-8">
-        {error ? <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-[12px] border border-danger/30 bg-danger-soft px-4 py-3 text-sm text-danger">
+        {error ? <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-danger/30 bg-danger-soft px-4 py-3 text-sm text-danger">
           <span className="min-w-0 flex-1">{error}</span>
           {!overview ? <Button variant="secondary" size="sm" onClick={onRetry}>Retry</Button> : null}
         </div> : null}
@@ -56,7 +56,7 @@ export const ProductionOverviewPanel = ({ project, overview, error, onRetry, sta
 
           {started ? <>
             <ProductionStats overview={overview} latest={latest} healthState={health.state} health={health.health} healthError={health.error} />
-            {health.health?.state === 'unhealthy' && health.health.output ? <details className="rounded-[12px] border border-danger/30 bg-danger-soft px-4 py-3">
+            {health.health?.state === 'unhealthy' && health.health.output ? <details className="rounded-xl border border-danger/30 bg-danger-soft px-4 py-3">
               <summary className="cursor-pointer text-sm font-bold text-danger">status.sh reported a problem</summary>
               <pre className="mt-2 max-h-40 overflow-auto font-mono text-xs whitespace-pre-wrap break-all text-danger">{health.health.output}</pre>
             </details> : null}

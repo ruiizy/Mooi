@@ -22,11 +22,11 @@ interface BackupListCardProps {
 export const BackupListCard = ({ backups, loading, error, hasMore, deployedRelease, locked, onLoadMore, ...actions }: BackupListCardProps) => (
   <Card as="section" className="flex flex-col overflow-hidden">
     <header className="flex items-center justify-between gap-3 border-b border-line px-5 py-4">
-      <h2 className="flex items-center gap-2 text-sm font-extrabold text-ink"><DatabaseBackup className="size-4 text-ink-subtle" />Backups</h2>
+      <h2 className="flex items-center gap-2 text-sm font-semibold text-ink"><DatabaseBackup className="size-4 text-ink-subtle" />Backups</h2>
       <span className="text-xs font-semibold text-ink-subtle tabular-nums">{backups.length > 0 ? `${backups.length}${hasMore ? '+' : ''}` : ''}</span>
     </header>
     {error ? <p role="alert" className="px-5 py-4 text-sm text-danger">{error}</p>
-      : loading && backups.length === 0 ? <div className="m-5 h-24 animate-pulse-soft rounded-[12px] bg-surface-2" />
+      : loading && backups.length === 0 ? <div className="m-5 h-24 animate-pulse-soft rounded-xl bg-surface-2" />
         : backups.length === 0 ? <p className="px-5 py-6 text-sm text-ink-muted">Every backup appears here with its date, time and release.</p>
           : <ul className="divide-y divide-line">
             {backups.map((backup) => <BackupRow key={backup.id} backup={backup} deployedRelease={deployedRelease} locked={locked} {...actions} />)}

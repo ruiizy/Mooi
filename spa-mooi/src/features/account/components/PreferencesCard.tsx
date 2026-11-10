@@ -16,7 +16,7 @@ export const PreferencesCard = () => {
 
   return (
     <Card className="p-5 sm:p-6">
-      <h2 className="text-sm font-extrabold tracking-[-0.02em] text-ink">Preferences</h2>
+      <h2 className="text-sm font-semibold tracking-[-0.015em] text-ink">Preferences</h2>
 
       <p className="mt-4 text-[13px] font-bold text-ink">Appearance</p>
 

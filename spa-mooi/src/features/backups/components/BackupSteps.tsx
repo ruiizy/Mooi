@@ -13,7 +13,7 @@ export const BackupSteps = ({ current }: { current: number }) => (
     {STEPS.map((step, index) => {
       const done = index < current;
       const active = index === current;
-      return <li key={step.title} className={cn('flex gap-3 rounded-[12px] border p-3.5 transition',
+      return <li key={step.title} className={cn('flex gap-3 rounded-xl border p-3.5 transition',
         active ? 'border-line-strong bg-surface' : 'border-line bg-surface-2/60')}>
         <span className={cn('flex size-6 shrink-0 items-center justify-center rounded-full text-[11px] font-extrabold',
           done ? 'bg-success-soft text-success' : active ? 'bg-contrast text-contrast-ink' : 'bg-surface-3 text-ink-subtle')}>

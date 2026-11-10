@@ -1,6 +1,6 @@
 import { env } from '@/config/env';
 import { getAccessToken } from '@/features/auth/lib/accessTokenProvider';
-import { useAuthStore } from '@/stores/authStore';
+import { SessionExpiredError } from '@/features/auth/lib/authErrors';
 
 const withAuth = (init: RequestInit | undefined, token: string): RequestInit => ({
   ...init,
@@ -8,19 +8,19 @@ const withAuth = (init: RequestInit | undefined, token: string): RequestInit => 
 });
 
 /**
- * Fetches an API path with the current access token attached. On a 401 it renews
- * once against a forced token; a second 401 clears the store and throws.
+ * Fetches a URL with the current access token attached. On a 401 it renews once against a forced
+ * token. The sign-in is ended by the token provider alone, and only on a real verdict: here a missing
+ * token or a second 401 just throws `SessionExpiredError`, while `AuthUnavailableError` (offline,
+ * server restarting) propagates untouched and leaves the player signed in.
  */
-export const authenticatedFetch = async (path: string, init?: RequestInit): Promise<Response> => {
-  const url = `${env.apiBaseUrl}${path}`;
+export const fetchWithAccessToken = async (url: string, init?: RequestInit): Promise<Response> => {
   const token = await getAccessToken();
 
   if (!token) {
-    useAuthStore.getState().clear();
-    throw new Error('Not authenticated');
+    throw new SessionExpiredError();
   }
 
-  let response = await fetch(url, withAuth(init, token));
+  const response = await fetch(url, withAuth(init, token));
 
   if (response.status !== 401) {
     return response;
@@ -29,16 +29,17 @@ export const authenticatedFetch = async (path: string, init?: RequestInit): Prom
   const retryToken = await getAccessToken(true);
 
   if (!retryToken) {
-    useAuthStore.getState().clear();
-    throw new Error('Not authenticated');
+    throw new SessionExpiredError();
   }
 
-  response = await fetch(url, withAuth(init, retryToken));
+  const retried = await fetch(url, withAuth(init, retryToken));
 
-  if (response.status === 401) {
-    useAuthStore.getState().clear();
-    throw new Error('Not authenticated');
+  if (retried.status === 401) {
+    throw new SessionExpiredError();
   }
 
-  return response;
+  return retried;
 };
+
+export const authenticatedFetch = (path: string, init?: RequestInit): Promise<Response> =>
+  fetchWithAccessToken(`${env.apiBaseUrl}${path}`, init);

@@ -104,7 +104,7 @@ export const SessionPage = () => {
         <div role="status" className="max-h-[30dvh] shrink-0 overflow-y-auto border-b border-line bg-surface-2 px-4 py-3 sm:px-5">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="min-w-0 flex-1 basis-48">
-              <p className="text-sm font-extrabold text-ink">{session.status === 'failed' ? 'This session failed' : 'This session is closed'}</p>
+              <p className="text-sm font-semibold text-ink">{session.status === 'failed' ? 'This session failed' : 'This session is closed'}</p>
               <p className="mt-1 break-words text-sm text-ink-muted">{session.detail ?? 'Your conversation is available below. Start a new session to continue.'}</p>
             </div>
             <div className="flex flex-wrap gap-2">

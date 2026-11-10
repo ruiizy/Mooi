@@ -30,7 +30,7 @@ export const usePlatformChat = (projectId: string | undefined, kind: Exclude<Ses
     setError(null);
     try {
       const session = await createSession({ projectId, kind, provider: request.provider,
-        connectionId: request.connectionId, model: request.model, effort: request.effort, initialMessage: request.message });
+        adapter: request.adapter, connectionId: request.connectionId, model: request.model, effort: request.effort, initialMessage: request.message });
       const store = useSessionsStore.getState();
       store.sessions.filter((item) => item.projectId === projectId && item.kind === kind && item.id !== session.id)
         .forEach((item) => store.removeSession(item.id));

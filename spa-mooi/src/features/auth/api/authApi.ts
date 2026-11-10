@@ -2,46 +2,55 @@ import { env } from '@/config/env';
 import type { RevokedSessionsResponse } from '@/features/auth/types/RevokedSessionsResponse';
 import type { SessionResponse } from '@/features/auth/types/SessionResponse';
 
-const jsonHeaders = { 'Content-Type': 'application/json' } as const;
+/**
+ * `X-Mooi-Auth` marks a cookie-transport client: the server then keeps the refresh token out of the
+ * body, and a cross-origin page cannot send the header without a preflight (CSRF guard).
+ */
+const authHeaders = { 'Content-Type': 'application/json', 'X-Mooi-Auth': 'cookie' } as const;
 
-const request = async <T>(path: string, init: RequestInit): Promise<T> => {
-  const response = await fetch(`${env.apiBaseUrl}${path}`, init);
+/** A hung renewal would hold the cross-tab lock, so every auth call gives up eventually. */
+const TIMEOUT_MS = 15_000;
+
+/** A failed auth call; `status` tells a suspended account (403) apart from any other failure. */
+export class AuthRequestError extends Error {
+  readonly status: number;
+
+  constructor(path: string, status: number) {
+    super(`Request to ${path} failed with ${status}`);
+    this.status = status;
+  }
+}
+
+const send = async (path: string, init: RequestInit): Promise<Response> => {
+  const response = await fetch(`${env.apiBaseUrl}${path}`, {
+    ...init,
+    method: 'POST',
+    credentials: 'include',
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+  });
 
   if (!response.ok) {
-    throw new Error(`Request to ${path} failed with ${response.status}`);
+    throw new AuthRequestError(path, response.status);
   }
 
-  return (await response.json()) as T;
+  return response;
 };
 
+const request = async <T>(path: string, init: RequestInit): Promise<T> => (await send(path, init)).json() as Promise<T>;
+
 export const loginWithGoogle = (idToken: string): Promise<SessionResponse> =>
-  request('/auth/google', {
-    method: 'POST',
-    headers: jsonHeaders,
-    body: JSON.stringify({ idToken }),
-  });
+  request('/auth/google', { headers: authHeaders, body: JSON.stringify({ idToken }) });
 
-export const refreshSession = (refreshToken: string): Promise<SessionResponse> =>
+/** The refresh token travels in the cookie; `legacyRefreshToken` only migrates a pre-cookie sign-in once. */
+export const refreshSession = (legacyRefreshToken?: string): Promise<SessionResponse> =>
   request('/auth/refresh', {
-    method: 'POST',
-    headers: jsonHeaders,
-    body: JSON.stringify({ refreshToken }),
+    headers: authHeaders,
+    body: JSON.stringify(legacyRefreshToken ? { refreshToken: legacyRefreshToken } : {}),
   });
 
-export const logout = async (refreshToken: string): Promise<void> => {
-  const response = await fetch(`${env.apiBaseUrl}/auth/logout`, {
-    method: 'POST',
-    headers: jsonHeaders,
-    body: JSON.stringify({ refreshToken }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Request to /auth/logout failed with ${response.status}`);
-  }
+export const logout = async (): Promise<void> => {
+  await send('/auth/logout', { headers: authHeaders, body: '{}' });
 };
 
 export const logoutEverywhere = (accessToken: string): Promise<RevokedSessionsResponse> =>
-  request('/auth/logout-all', {
-    method: 'POST',
-    headers: { ...jsonHeaders, Authorization: `Bearer ${accessToken}` },
-  });
+  request('/auth/logout-all', { headers: { ...authHeaders, Authorization: `Bearer ${accessToken}` }, body: '{}' });

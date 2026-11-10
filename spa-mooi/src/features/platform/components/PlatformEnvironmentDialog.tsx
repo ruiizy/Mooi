@@ -50,7 +50,7 @@ export const PlatformEnvironmentDialog = ({
     finally { setBusy(false); }
   };
 
-  const field = 'h-10 min-w-0 rounded-[10px] border border-line bg-surface-2 px-3 font-mono text-xs text-ink outline-none focus:border-brand/50';
+  const field = 'h-10 min-w-0 rounded-control border border-line bg-surface-2 px-3 font-mono text-xs text-ink outline-none focus:border-brand/50';
 
   return <Modal open size="lg" onClose={busy ? () => undefined : onClose} title="Environment variables"
     description={`${description} Leave a field blank to keep its current value.`}
@@ -74,7 +74,7 @@ export const PlatformEnvironmentDialog = ({
                 <Trash2 className="size-3.5" /></button> : null}
             </span>
           </div>
-          {variable.inherited ? <p className="rounded-[10px] bg-surface-2 px-3 py-2.5 text-xs text-ink-muted">
+          {variable.inherited ? <p className="rounded-control bg-surface-2 px-3 py-2.5 text-xs text-ink-muted">
             Managed in {inheritedEnvironment(variable.name).owner}.</p>
             : <input type="password" autoComplete="new-password" spellCheck={false} disabled={busy || removing}
               value={values[variable.name] ?? ''} onChange={(event) => setValues((current) => ({ ...current, [variable.name]: event.target.value }))}
@@ -92,16 +92,16 @@ export const PlatformEnvironmentDialog = ({
           onChange={(event) => setAdded((current) => current.map((item, position) => position === index ? { ...item, value: event.target.value } : item))}
           className={field} />
         <button type="button" onClick={() => setAdded((current) => current.filter((_, position) => position !== index))} disabled={busy}
-          aria-label="Discard variable" title="Discard" className="grid size-10 place-items-center rounded-[10px] text-ink-subtle hover:bg-surface-2 hover:text-ink">
+          aria-label="Discard variable" title="Discard" className="grid size-10 place-items-center rounded-control text-ink-subtle hover:bg-surface-2 hover:text-ink">
           <Trash2 className="size-4" /></button>
       </li>)}
     </ul>
     {loading ? <p className="flex items-center gap-2 text-sm text-ink-muted"><LoaderCircle className="size-4 animate-spin" />Loading variables…</p>
       : variables.length === 0 && added.length === 0 ? <p className="text-sm text-ink-muted">{emptyDescription}</p> : null}
-    {loadError ? <p role="alert" className="mt-4 rounded-[10px] border border-danger/30 bg-danger-soft px-4 py-2.5 text-sm text-danger">{loadError}</p> : null}
+    {loadError ? <p role="alert" className="mt-4 rounded-control border border-danger/30 bg-danger-soft px-4 py-2.5 text-sm text-danger">{loadError}</p> : null}
     <button type="button" onClick={() => setAdded((current) => [...current, { name: '', value: '' }])} disabled={busy || loading}
-      className="mt-4 inline-flex items-center gap-1.5 rounded-[10px] px-2 py-1.5 text-xs font-bold text-ink-muted transition hover:bg-surface-2 hover:text-ink">
+      className="mt-4 inline-flex items-center gap-1.5 rounded-control px-2 py-1.5 text-xs font-bold text-ink-muted transition hover:bg-surface-2 hover:text-ink">
       <Plus className="size-3.5" />Add variable</button>
-    {error ? <p role="alert" className="mt-4 rounded-[10px] border border-danger/30 bg-danger-soft px-4 py-2.5 text-sm text-danger">{error}</p> : null}
+    {error ? <p role="alert" className="mt-4 rounded-control border border-danger/30 bg-danger-soft px-4 py-2.5 text-sm text-danger">{error}</p> : null}
   </Modal>;
 };

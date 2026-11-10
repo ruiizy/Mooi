@@ -16,7 +16,7 @@ interface BackupRowProps {
   onDelete: (backup: Backup) => void;
 }
 
-const rowAction = 'grid size-9 shrink-0 place-items-center rounded-[10px] text-ink-subtle transition hover:bg-surface hover:text-ink focus-visible:outline-2 focus-visible:outline-brand disabled:pointer-events-none disabled:opacity-40';
+const rowAction = 'grid size-9 shrink-0 place-items-center rounded-control text-ink-subtle transition hover:bg-surface hover:text-ink focus-visible:outline-2 focus-visible:outline-brand disabled:pointer-events-none disabled:opacity-40';
 
 /** One backup: when, which release and whether it was proven, with its three actions as distinct icons. */
 export const BackupRow = ({ backup, deployedRelease, locked, onOpen, onVerify, onRestore, onDelete }: BackupRowProps) => {

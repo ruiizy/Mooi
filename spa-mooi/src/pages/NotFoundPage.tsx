@@ -5,7 +5,7 @@ import { buttonStyles } from '@/shared/styles/buttonStyles';
 
 export const NotFoundPage = () => (
   <div className="mx-auto flex w-full max-w-7xl flex-col items-center px-4 py-24 text-center lg:px-6">
-    <span className="flex size-14 items-center justify-center rounded-[14px] bg-surface-2 text-ink-muted">
+    <span className="flex size-14 items-center justify-center rounded-card bg-surface-2 text-ink-muted">
       <Compass className="size-6" />
     </span>
 

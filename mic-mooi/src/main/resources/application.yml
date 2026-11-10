@@ -63,10 +63,18 @@ app:
     google-jwks-uri: ${GOOGLE_JWKS_URI:https://www.googleapis.com/oauth2/v3/certs}
     jwt-secret: ${JWT_SECRET:}
     access-token-expires-in: ${ACCESS_TOKEN_EXPIRES_IN:15m}
-    refresh-token-expires-in: ${REFRESH_TOKEN_EXPIRES_IN:365d}
-    session-max-lifetime: ${SESSION_MAX_LIFETIME:730d}
+    refresh-token-expires-in: ${REFRESH_TOKEN_EXPIRES_IN:30d}
+    # Optional absolute ceiling from the session's creation; blank = none (an active player never signs in again).
+    session-max-lifetime: ${SESSION_MAX_LIFETIME:}
     refresh-token-purge-cron: ${REFRESH_TOKEN_PURGE_CRON:0 30 3 * * *}
     replay-grace-seconds: ${REPLAY_GRACE_SECONDS:30}
+    refresh-cookie:
+      name: ${AUTH_REFRESH_COOKIE_NAME:mooi_refresh}
+      # Public path of the auth endpoints behind the gateway; the preview proxy re-roots it per preview.
+      path: ${AUTH_REFRESH_COOKIE_PATH:/api/mooi/auth}
+      secure: ${AUTH_REFRESH_COOKIE_SECURE:true}
+    # Transition only: accept and return the refresh token in JSON bodies (pre-cookie clients). Remove later.
+    legacy-body-token-enabled: ${AUTH_LEGACY_BODY_TOKEN_ENABLED:true}
     admin-emails: ${ADMIN_EMAILS:}
     # Development only (Mooi session previews): sign in as a fixed player without Google.
     google-mock:
@@ -90,12 +98,9 @@ app:
     request-timeout-ms: ${GITHUB_REQUEST_TIMEOUT_MS:10000}
   agents:
     state-expires-in: ${AGENT_STATE_EXPIRES_IN:10m}
-    token-refresh-skew: ${AGENT_TOKEN_REFRESH_SKEW:5m}
+    # Claude sign-in tokens live 8h; renewing 1h early lets a turn started on one finish on it.
+    token-refresh-skew: ${AGENT_TOKEN_REFRESH_SKEW:1h}
     request-timeout-ms: ${AGENT_REQUEST_TIMEOUT_MS:10000}
     claude:
+      # Offers the Claude Code sign-in; false falls back to pasting a `claude setup-token` token.
       enabled: ${AGENT_CLAUDE_ENABLED:true}
-      client-id: ${AGENT_CLAUDE_CLIENT_ID:}
-      authorize-uri: ${AGENT_CLAUDE_AUTHORIZE_URI:}
-      token-uri: ${AGENT_CLAUDE_TOKEN_URI:}
-      scopes: ${AGENT_CLAUDE_SCOPES:}
-      redirect-uri: ${AGENT_CLAUDE_REDIRECT_URI:}

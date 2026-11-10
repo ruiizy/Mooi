@@ -24,6 +24,11 @@ export const useSessionStream = (sessionId: string | undefined): void => {
       onState: (state) => useSessionsStore.getState().setStreamState(sessionId, state),
     });
 
-    return close;
+    return () => {
+      close();
+      // A session closed while it was watched stays on screen only as long as someone looks at it.
+      const store = useSessionsStore.getState();
+      if (store.sessions.find((session) => session.id === sessionId)?.status === 'closed') store.removeSession(sessionId);
+    };
   }, [sessionId]);
 };

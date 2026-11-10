@@ -55,13 +55,13 @@ export const BackupDetailDialog = ({ backup, projectName, onClose, onVerify, onR
       </div>
     </div>
 
-    {error ? <p role="alert" className="mt-4 rounded-[10px] border border-danger/30 bg-danger-soft px-4 py-2.5 text-sm text-danger">{error}</p>
+    {error ? <p role="alert" className="mt-4 rounded-control border border-danger/30 bg-danger-soft px-4 py-2.5 text-sm text-danger">{error}</p>
       : !detail ? <p className="mt-5 flex items-center gap-2 text-sm text-ink-muted"><LoaderCircle className="size-4 animate-spin" />Loading backup…</p>
         : <div className="mt-5 grid gap-4 md:grid-cols-[220px_minmax(0,1fr)]">
           <ol aria-label="Operations" className="flex gap-1.5 overflow-x-auto md:flex-col">
             {detail.operations.map(({ operation: item }) => <li key={item.operationId} className="shrink-0">
               <button type="button" onClick={() => setSelected(item.operationId)} aria-pressed={operation?.operation.operationId === item.operationId}
-                className={cn('flex w-full min-w-48 items-center gap-2.5 rounded-[10px] border px-2.5 py-2 text-left transition focus-visible:outline-2 focus-visible:outline-brand md:min-w-0',
+                className={cn('flex w-full min-w-48 items-center gap-2.5 rounded-control border px-2.5 py-2 text-left transition focus-visible:outline-2 focus-visible:outline-brand md:min-w-0',
                   operation?.operation.operationId === item.operationId ? 'border-ink bg-surface' : 'border-line hover:bg-surface-2')}>
                 <DeploymentStateIcon state={item.state} className="size-8" />
                 <span className="min-w-0">
@@ -79,7 +79,7 @@ export const BackupDetailDialog = ({ backup, projectName, onClose, onVerify, onR
                 className={cn('rounded-lg px-3 py-1.5 font-mono text-xs font-bold transition',
                   view === item ? 'bg-contrast text-contrast-ink' : 'bg-surface-2 text-ink-muted hover:text-ink')}>{item === 'output' ? 'Output' : 'Script'}</button>)}
             </div>
-            <pre role="tabpanel" className={cn('mt-3 max-h-[45dvh] overflow-auto rounded-[12px] p-4 font-mono text-xs leading-6 whitespace-pre-wrap break-all',
+            <pre role="tabpanel" className={cn('mt-3 max-h-[45dvh] overflow-auto rounded-xl p-4 font-mono text-xs leading-6 whitespace-pre-wrap break-all',
               view === 'output' ? 'bg-neutral-950 text-neutral-100' : 'border border-line bg-surface-2 text-ink')}>{content}</pre>
           </div>
         </div>}

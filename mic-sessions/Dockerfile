@@ -1,6 +1,7 @@
 # Production image of mic-sessions: the agent runtime host.
 #
-# Agents (Claude Code and Codex, both bundled by their pinned official SDKs) run in full access
+# Agents (Claude Code and Codex, both bundled by their pinned official SDKs, plus a standalone pinned
+# Claude Code CLI for the Claude CLI adapter) run in full access
 # inside this container, so it carries the toolchains a session checkout usually needs: Git, Docker
 # CLI with Compose and Buildx (deployments drive the host engine through its mounted socket), Node,
 # Bun, Python with uv, Java 25 and the usual shell utilities (ssh, rsync, curl, jq, make, ripgrep).
@@ -39,9 +40,31 @@ COPY --from=node:24-trixie-slim /usr/local/lib/node_modules /usr/local/lib/node_
 COPY --from=oven/bun:1.3-debian /usr/local/bin/bun /usr/local/bin/bun
 COPY --from=ghcr.io/astral-sh/uv:0.8 /uv /uvx /usr/local/bin/
 COPY --from=eclipse-temurin:25-jdk /opt/java/openjdk /opt/java/openjdk
+
+# RTK compresses the output of the shell commands Claude sessions run (see AGENT_CLAUDE_RTK). The
+# Apache-2.0 `rtk-oss` edition carries every command filter; the binary is pinned and verified.
+ARG RTK_VERSION=1.0.1
+RUN case "$(dpkg --print-architecture)" in \
+        amd64) target=x86_64-unknown-linux-musl sha=a44e8ffc43981100b4ddf1710399a1649a6c874591aa6d0c0727fe6cbd983c41 ;; \
+        arm64) target=aarch64-unknown-linux-gnu sha=ee24a43dac9162de55fea8460b5efcd56d401ec28b5117c921bffa8a57bc136e ;; \
+        *) echo "rtk: unsupported architecture" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL -o /tmp/rtk.tar.gz "https://github.com/rtk-ai/rtk/releases/download/v${RTK_VERSION}/rtk-oss-${target}.tar.gz" \
+    && echo "${sha}  /tmp/rtk.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/rtk.tar.gz -C /usr/local/bin rtk \
+    && rm /tmp/rtk.tar.gz \
+    && rtk --version
+
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
     && ln -s bun /usr/local/bin/bunx
+
+# Standalone Claude Code CLI driven by the Claude CLI adapter (AGENT_CLAUDE_CLI); the SDK adapter keeps the
+# copy its pinned SDK bundles. Pinned so both adapters can move independently; never auto-updated.
+ARG CLAUDE_CODE_VERSION=2.1.310
+RUN npm install -g --no-audit --no-fund "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+    && claude --version \
+    && rm -rf /root/.npm
 
 # Install once at image build; agent turns never download packages or browsers.
 COPY browser/package.json browser/package-lock.json /opt/mooi-browser/

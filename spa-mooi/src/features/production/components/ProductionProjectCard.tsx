@@ -16,7 +16,7 @@ interface ProductionProjectCardProps {
 /** A project on the deployments landing: its last release and outcome, opening its production view. */
 export const ProductionProjectCard = ({ project, latest }: ProductionProjectCardProps) => (
   <Link to={deploymentPath(project.id)}
-    className="group flex min-w-0 flex-col gap-4 rounded-[14px] border border-line bg-surface p-4 transition hover:-translate-y-0.5 hover:border-line-strong hover:shadow-[0_18px_40px_-24px_rgba(0,0,0,0.35)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand sm:gap-5 sm:p-5">
+    className="group flex min-w-0 flex-col gap-4 rounded-card border border-line bg-surface p-4 transition hover:-translate-y-0.5 hover:border-line-strong hover:shadow-raised focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand sm:gap-5 sm:p-5">
     <div className="flex items-center gap-3">
       <Initials value={project.name} size="md" />
       <div className="min-w-0 flex-1">

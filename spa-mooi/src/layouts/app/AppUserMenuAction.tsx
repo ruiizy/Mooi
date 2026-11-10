@@ -12,7 +12,7 @@ interface AppUserMenuActionProps {
 }
 
 const tones = {
-  default: 'text-ink-muted hover:bg-surface-2 hover:text-ink',
+  default: 'text-ink hover:bg-surface-2 focus-visible:bg-surface-2 [&>svg]:text-ink-subtle',
   danger: 'text-danger hover:bg-danger-soft',
 };
 
@@ -32,7 +32,7 @@ export const AppUserMenuAction = ({
   tone = 'default',
 }: AppUserMenuActionProps) => {
   const className = cn(
-    'flex h-11 w-full items-center gap-2.5 rounded-[10px] px-3 text-left text-sm font-bold transition duration-200 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-brand',
+    'flex h-10 w-full items-center gap-2.5 rounded-chip px-2.5 text-left text-[13px] font-medium transition-colors duration-150 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-brand',
     tones[tone],
     disabled && 'pointer-events-none opacity-55',
   );

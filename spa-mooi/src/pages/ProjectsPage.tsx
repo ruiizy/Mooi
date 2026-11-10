@@ -16,7 +16,7 @@ const Skeleton = () => (
     {[0, 1, 2].map((card) => (
       <div
         key={card}
-        className="h-[196px] animate-pulse-soft rounded-[14px] border border-line bg-surface-2"
+        className="h-[196px] animate-pulse-soft rounded-card border border-line bg-surface"
       />
     ))}
   </div>
@@ -76,7 +76,7 @@ export const ProjectsPage = () => {
       {visibleProjects.length > 0 ? (
         <div className="mt-8 flex items-center justify-between gap-3 border-b border-line pb-2.5">
           <Eyebrow>All projects</Eyebrow>
-          <span className="text-[11px] font-bold text-ink-subtle">
+          <span className="font-mono text-[11px] text-ink-subtle tabular-nums">
             {projects.length} {projects.length === 1 ? 'project' : 'projects'}
           </span>
         </div>
@@ -86,7 +86,7 @@ export const ProjectsPage = () => {
         {status === 'loading' && projects.length === 0 ? <Skeleton /> : null}
 
         {status === 'error' ? (
-          <div className="flex flex-col gap-3 rounded-[14px] border border-danger/30 bg-danger-soft px-4 py-3.5 sm:flex-row sm:items-center">
+          <div className="flex flex-col gap-3 rounded-card border border-danger/30 bg-danger-soft px-4 py-3.5 sm:flex-row sm:items-center">
             <p className="min-w-0 flex-1 text-sm text-danger">{error}</p>
             <span className="shrink-0">
               <Button variant="secondary" size="sm" onClick={reload}>
