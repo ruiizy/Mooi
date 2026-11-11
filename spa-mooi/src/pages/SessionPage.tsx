@@ -93,7 +93,7 @@ export const SessionPage = () => {
   return (
     <div className="flex h-full min-h-0 flex-col">
       <WorkspaceHeader
-        key={session.id}
+        key={`header-${session.id}`}
         project={project}
         back={back}
         session={session}
@@ -115,7 +115,7 @@ export const SessionPage = () => {
           </div>
         </div>
       ) : null}
-      <SessionWorkspace key={session.id} sessionId={session.id} deployEnabled={deployEnabled}>
+      <SessionWorkspace key={`workspace-${session.id}`}sessionId={session.id} deployEnabled={deployEnabled}>
         <div className="flex h-full min-h-0 flex-col">
           <DeploymentTestedBar session={session} busy={busy} onClear={clearConversation} />
           <div className="min-h-0 flex-1">

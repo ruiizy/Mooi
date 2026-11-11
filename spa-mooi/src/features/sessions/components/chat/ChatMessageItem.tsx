@@ -6,12 +6,13 @@ import { TurnBlocks } from './TurnBlocks';
 import { TurnFooter } from '@/features/sessions/components/chat/TurnFooter';
 import type { AgentCapabilities } from '@/features/sessions/types/AgentCapabilities';
 import type { TranscriptEntry } from '@/features/sessions/types/TranscriptEntry';
-import { LogoMark } from '@/shared/components/LogoMark';
+import { AgentProviderIcon } from '@/features/agents/components/AgentProviderIcon';
 import { formatTime } from '@/shared/utils/formatTime';
 
 interface ChatMessageItemProps {
   sessionId: string;
   entry: TranscriptEntry;
+  provider: string;
   providerLabel: string;
   capabilities: AgentCapabilities;
   /** The agent is working on this turn right now (not finished, not waiting on the user). */
@@ -25,7 +26,7 @@ interface ChatMessageItemProps {
  * turn is live, the open block — or a fresh one once the agent has spoken — names what it is doing. Optional blocks are gated on the session's capabilities, never
  * on its provider id: a provider without `thinking` never shows one.
  */
-export const ChatMessageItem = memo(function ChatMessageItem({ sessionId, entry, providerLabel, capabilities, live }: ChatMessageItemProps) {
+export const ChatMessageItem = memo(function ChatMessageItem({ sessionId, entry, provider, providerLabel, capabilities, live }:ChatMessageItemProps) {
   if (entry.kind === 'error') {
     return (
       <li className="flex animate-fade-up items-start gap-2.5 rounded-xl border border-danger/30 bg-danger-soft px-3.5 py-2.5 text-sm leading-relaxed text-danger">
@@ -55,7 +56,9 @@ export const ChatMessageItem = memo(function ChatMessageItem({ sessionId, entry,
 
   return (
     <li className="flex animate-fade-up gap-2 sm:gap-4">
-      <LogoMark className="hidden size-7 shrink-0 drop-shadow-[0_2px_6px_rgb(39_110_241/0.25)] sm:block" />
+      <span aria-hidden className="hidden size-7 shrink-0 items-center justify-center rounded-lg border border-line bg-surface shadow-card sm:flex">
+        <AgentProviderIcon provider={provider} className="size-4" />
+      </span>
 
       <div className="min-w-0 flex-1">
         <p className="flex items-center gap-2">
