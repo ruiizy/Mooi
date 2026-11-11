@@ -24,6 +24,8 @@ interface ChatPanelProps {
   modelError: string | null;
   actionError: string | null;
   onSend: (text: string, images?: PreparedImage[]) => Promise<boolean>;
+  onQueue: (text: string, images?: PreparedImage[]) => Promise<boolean>;
+  onUnqueue: (messageId: string) => Promise<boolean>;
   onInterrupt: () => Promise<boolean>;
   onRecover: () => Promise<boolean>;
   onCompact: (instructions?: string) => Promise<boolean>;
@@ -50,6 +52,8 @@ export const ChatPanel = ({
   modelError,
   actionError,
   onSend,
+  onQueue,
+  onUnqueue,
   onInterrupt,
   onRecover,
   onCompact,
@@ -131,6 +135,9 @@ export const ChatPanel = ({
       hasConversation={entries.some((entry) => entry.kind === 'user')}
       acceptsImages={Boolean(session.capabilities.images)}
       onSend={send}
+      queue={session.queue}
+      onQueue={onQueue}
+      onUnqueue={onUnqueue}
       onInterrupt={onInterrupt}
       recoverable={Boolean(session.recoverable)}
       onRecover={onRecover}

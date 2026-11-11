@@ -123,6 +123,10 @@ EVENT_PRODUCTION_UPDATED = "production.updated"
 EVENT_SESSION_CLEARED = "session.cleared"
 EVENT_SESSION_COMPACTION = "session.compaction"
 EVENT_MERGE_COMPLETED = "merge.completed"
+# A snapshot of the messages waiting for the agent to finish its turn (see `_drain_queue`).
+EVENT_SESSION_QUEUE = "session.queue"
+# Messages a chat holds at most while its agent is busy.
+_QUEUE_LIMIT = 20
 
 # --- wire contracts ---------------------------------------------------------------------------
 
@@ -541,6 +545,8 @@ class SessionPayload(BaseModel):
     baseCommit: str | None
     # Failed with its runtime and workspace intact: `POST /sessions/{id}/recover` reconnects it.
     recoverable: bool = False
+    # Messages queued while the agent was busy, oldest first.
+    queue: list[QueuedMessagePayload] = Field(default_factory=list)
 
 
 class SessionsResponse(BaseModel):
@@ -605,6 +611,16 @@ class SendMessageResponse(BaseModel):
     seq: int
     # Stored image metadata, in upload order, so the sender can show its local copies at once.
     images: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class QueuedMessagePayload(BaseModel):
+    """A message waiting for the agent's current turn to end; delivered in order, one per turn."""
+
+    id: str
+    text: str
+    # Stored image metadata, in upload order, as on a sent message.
+    images: list[dict[str, Any]] = Field(default_factory=list)
+    createdAt: datetime
 
 
 class PermissionDecisionRequest(BaseModel):
@@ -690,6 +706,20 @@ class PendingInfo:
     request_id: str
 
 
+@dataclass(frozen=True)
+class QueuedMessage:
+    """A message sent while the agent was busy; its images are already stored in the workspace."""
+
+    id: str
+    text: str
+    images: list[images.Image]
+    created_at: datetime
+
+    def payload(self) -> QueuedMessagePayload:
+        return QueuedMessagePayload(id=self.id, text=self.text, createdAt=self.created_at,
+                                    images=[image.payload() for image in self.images])
+
+
 @dataclass
 class Session:
     """One live pairing of player, project, provider and workspace.
@@ -750,6 +780,9 @@ class Session:
     # Side questions being answered right now; they never enter the log.
     asides: int = 0
     interactions: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Messages waiting for the current turn to end, oldest first, and the task delivering the next one.
+    queue: list[QueuedMessage] = field(default_factory=list)
+    queue_task: asyncio.Task[None] | None = None
     # --- push-based changes refresh ---
     changes_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     changes_task: asyncio.Task[None] | None = None
@@ -797,6 +830,7 @@ class Session:
             workspacePath=None if self.kind in _PLATFORM_KINDS or self.workspace == _UNSET_PATH else str(self.workspace),
             baseCommit=self.base_commit or None,
             recoverable=self.status == STATUS_FAILED and _recoverable(self),
+            queue=[message.payload() for message in self.queue],
         )
 
 
@@ -942,14 +976,23 @@ def record(session: Session, type_: str, data: dict[str, Any]) -> Event:
     if type_ == EVENT_DEPLOYMENT_UPDATED:
         snapshot = DeploymentSnapshot.model_validate(data)
         event = session.log.append(type_, snapshot.model_dump(mode="json"))
+        starting = session.deployment.state == "starting"
         session.deployment = snapshot
         if snapshot.state != "running":
             previews.withdraw(session.id)  # The preview path dies with the running state.
         _announce(session)
+        if starting and snapshot.state != "starting":
+            _schedule_queue(session)  # The chat resumes once the deployment start is over.
         return event
     if type_ == EVENT_DEPLOYMENT_LOG:
         return session.log.append(type_, DeploymentLog.model_validate(data).model_dump(mode="json"))
+    if type_ == EVENT_SESSION_QUEUE:
+        # A snapshot outside the turns: `_publish_queue` already changed `session.queue`.
+        event = session.log.append(type_, data)
+        _announce(session)
+        return event
 
+    previous_status = session.status
     if type_ == "message.user":
         session.turn_id = uuid4().hex
     if type_ == EVENT_SESSION_STATUS and data.get("status") == STATUS_FAILED:
@@ -1008,6 +1051,8 @@ def record(session: Session, type_: str, data: dict[str, Any]) -> Event:
     if type_ in _SUMMARY_EVENTS or (type_ == "session.usage"
                                     and _usage_signature(session.usage) != session.usage_signature):
         _announce(session)
+    if session.status == STATUS_READY and previous_status != STATUS_READY:
+        _schedule_queue(session)  # Each turn's end hands the agent the next queued message.
     return event
 
 
@@ -1718,32 +1763,147 @@ async def send_message(
 ) -> SendMessageResponse:
     session = get_registry().get_for(caller, session_id)
     session.agent_caller = caller
+    _validate_message(session, body)
+    async with session.operation_lock:
+        if not _accepts_message(session):
+            raise ApiException.conflict("The session is not ready to accept a message")
+        runtime = _runtime(session)
+        await _prepare_turn(session, runtime, caller)
+        if not _accepts_message(session):
+            raise ApiException.conflict("The session is not ready to accept a message")
+        attached = await _store_images(session, body)
+        return await _deliver(session, runtime, body.text.strip() if attached else body.text, attached)
+
+
+def _validate_message(session: Session, body: SendMessageRequest) -> None:
     if not body.text.strip() and not body.images:
         raise ApiException.bad_request("Message cannot be blank")
     if body.images and not describe(session.provider).adapter(session.adapter).capabilities.images:
         raise ApiException.bad_request("This agent does not accept images")
+
+
+def _accepts_message(session: Session) -> bool:
+    """The agent is free for a new turn: no turn, question, compaction or deployment start is running."""
+    return session.status == STATUS_READY and not session.closing and session.deployment.state != "starting"
+
+
+async def _store_images(session: Session, body: SendMessageRequest) -> list[images.Image]:
+    return await images.store(session.workspace, [
+        images.Upload(item.data, item.mediaType, item.name, item.width, item.height) for item in body.images])
+
+
+async def _prepare_turn(session: Session, runtime: AgentRuntime, caller: Caller) -> None:
+    """Renews the agent's credential and applies the selected configuration; the caller holds the lock.
+
+    Configuration events describe the user's selection for the next turn. Reconcile here even after
+    provisioning, which may have started with an older selection. A failed update leaves the draft
+    and session retryable."""
+    try:
+        refresh = getattr(runtime, "refresh_credential", None)
+        if refresh:
+            await refresh(await mooi.fetch_agent_credential(caller, str(session.connection_id)))
+        await runtime.set_configuration(session.config)
+    except ApiException:
+        raise
+    except Exception:
+        LOG.warning("Session %s could not apply its configuration", session.id, exc_info=True)
+        raise ApiException.bad_gateway("The agent could not apply the selected configuration") from None
+
+
+# --- queued messages ---------------------------------------------------------------------------
+
+
+@router.post("/sessions/{session_id}/queue", status_code=status.HTTP_201_CREATED)
+async def queue_message(
+    session_id: UUID, body: SendMessageRequest, caller: Annotated[Caller, Depends(current_caller)]
+) -> QueuedMessagePayload:
+    """Queues a message for when the agent finishes; each turn's end delivers the next one, in order.
+
+    Queuing while the agent is free delivers the message at once, so a client never has to pick the
+    right endpoint for a status that may change in flight."""
+    session = get_registry().get_for(caller, session_id)
+    session.agent_caller = caller
+    _validate_message(session, body)
     async with session.operation_lock:
-        if session.status != STATUS_READY or session.closing or session.deployment.state == "starting":
-            raise ApiException.conflict("The session is not ready to accept a message")
-        # Configuration events describe the user's selection for the next turn.
-        # Reconcile here even after provisioning, which may have started with an
-        # older selection. A failed update leaves the draft and session retryable.
-        runtime = _runtime(session)
-        try:
-            refresh = getattr(runtime, "refresh_credential", None)
-            if refresh:
-                await refresh(await mooi.fetch_agent_credential(caller, str(session.connection_id)))
-            await runtime.set_configuration(session.config)
-        except ApiException:
-            raise
-        except Exception:
-            LOG.warning("Session %s could not apply its configuration", session.id, exc_info=True)
-            raise ApiException.bad_gateway("The agent could not apply the selected configuration") from None
-        if session.status != STATUS_READY or session.closing or session.deployment.state == "starting":
-            raise ApiException.conflict("The session is not ready to accept a message")
-        attached = await images.store(session.workspace, [
-            images.Upload(item.data, item.mediaType, item.name, item.width, item.height) for item in body.images])
-        return await _deliver(session, runtime, body.text.strip() if attached else body.text, attached)
+        if session.closing or session.runtime is None or session.status not in _QUEUE_STATUSES:
+            raise ApiException.conflict("The session cannot queue messages right now")
+        if len(session.queue) >= _QUEUE_LIMIT:
+            raise ApiException.conflict(f"At most {_QUEUE_LIMIT} messages can wait in the queue")
+        attached = await _store_images(session, body)
+        text = body.text.strip() if attached else body.text
+        message = QueuedMessage(uuid4().hex, text, attached, datetime.now(UTC))
+        session.queue.append(message)
+        _publish_queue(session)
+        _touch(session)
+    _schedule_queue(session)
+    return message.payload()
+
+
+@router.delete("/sessions/{session_id}/queue/{message_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def unqueue_message(
+    session_id: UUID, message_id: str, caller: Annotated[Caller, Depends(current_caller)]
+) -> None:
+    """Withdraws a queued message before the agent receives it; 404 once it has been delivered."""
+    session = get_registry().get_for(caller, session_id)
+    async with session.operation_lock:
+        remaining = [message for message in session.queue if message.id != message_id]
+        if len(remaining) == len(session.queue):
+            raise ApiException.not_found("This message is no longer queued")
+        session.queue = remaining
+        _publish_queue(session)
+        _touch(session)
+
+
+_QUEUE_STATUSES = (STATUS_READY, STATUS_WORKING, STATUS_WAITING, STATUS_COMPACTING)
+
+
+def _publish_queue(session: Session) -> None:
+    record(session, EVENT_SESSION_QUEUE, {"messages": [message.payload().model_dump(mode="json")
+                                                       for message in session.queue]})
+
+
+def _schedule_queue(session: Session) -> None:
+    """Starts delivering the next queued message once the agent is free, unless a delivery is on its way."""
+    if not session.queue or not _accepts_message(session):
+        return
+    if session.queue_task is not None and not session.queue_task.done():
+        return
+    session.queue_task = _spawn(session, _drain_queue(session))
+
+
+async def _drain_queue(session: Session) -> None:
+    """Delivers the oldest queued message as the user's next message. Its turn's end schedules the next one,
+    so a queue of any length goes out one turn at a time, in order.
+
+    A message that cannot go out stays first in line: the next turn's end, or the next queued message,
+    tries again."""
+    try:
+        async with session.operation_lock:
+            runtime = session.runtime
+            if not session.queue or not _accepts_message(session) or runtime is None:
+                return
+            try:
+                caller = await _agent_caller(session)
+                if caller is None:
+                    return
+                await _prepare_turn(session, runtime, caller)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOG.warning("Session %s could not deliver its queued message", session.id, exc_info=True)
+                record(session, "error",
+                       {"message": "The queued message could not be sent yet. It stays queued."})
+                return
+            if not session.queue or not _accepts_message(session):
+                return
+            message = session.queue.pop(0)
+            _publish_queue(session)
+            # A failed delivery is already recorded on the session by `_deliver`.
+            with suppress(ApiException):
+                await _deliver(session, runtime, message.text, message.images)
+    finally:
+        if session.queue_task is asyncio.current_task():
+            session.queue_task = None
 
 
 async def _deliver(session: Session, runtime: AgentRuntime, text: str,

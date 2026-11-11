@@ -1,6 +1,7 @@
 import type { SessionUsage } from '@/features/sessions/types/SessionUsage';
 import { mergeDeployment } from './mergeDeployment';
 import type { DeploymentSetup } from '@/features/sessions/types/DeploymentSetup';
+import type { QueuedMessage } from '@/features/sessions/types/QueuedMessage';
 import type { Session } from '@/features/sessions/types/Session';
 import type { SessionEvent } from '@/features/sessions/types/SessionEvent';
 import type { SessionStatus } from '@/features/sessions/types/SessionStatus';
@@ -23,6 +24,7 @@ export const applySessionToSession = (session: Session, event: SessionEvent): Se
     return { ...session, lastSeq: seq, deployment: mergeDeployment(session.deployment, event.data) };
   }
   if (type === 'deployment.log') return { ...session, lastSeq: seq };
+  if (type === 'session.queue') return { ...session, lastSeq: seq, queue: (data.messages as QueuedMessage[] | undefined) ?? [] };
   const patch: Partial<Session> = { updatedAt: at, lastSeq: seq };
 
   if (type === 'session.usage') {

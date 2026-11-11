@@ -3,6 +3,7 @@ import type { DeploymentSnapshot } from './DeploymentSnapshot';
 import type { DeploymentSetup } from './DeploymentSetup';
 import type { AgentCapabilities } from '@/features/sessions/types/AgentCapabilities';
 import type { PendingRequest } from '@/features/sessions/types/PendingRequest';
+import type { QueuedMessage } from '@/features/sessions/types/QueuedMessage';
 import type { SessionKind } from '@/features/sessions/types/SessionKind';
 import type { SessionStatus } from '@/features/sessions/types/SessionStatus';
 
@@ -38,4 +39,6 @@ export interface Session {
   baseCommit: string | null;
   /** Failed with its agent and workspace intact: reconnecting resumes the conversation. */
   recoverable?: boolean;
+  /** Messages queued while the agent was busy, oldest first; each turn's end sends the next one. */
+  queue?: QueuedMessage[];
 }

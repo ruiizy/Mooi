@@ -51,6 +51,11 @@ from it. Where they differ, this context wins over the current implementation (s
   (worktree/clone), so features progress in parallel without interfering.
 - Chat UX like Claude Code / Codex. Supported providers: **Claude** and **Codex**.
 - Live view of what the agent does and of changed files on the session branch.
+- **Message queue**: messages sent while the agent is busy (a turn, a compaction, a deployment start) wait
+  in the chat's queue, kept by the platform and shown live on every device. Each turn's end delivers the
+  next one, in order, until the queue is empty, even with no device connected. Queued messages can be
+  edited or removed until they go out; stopping a turn keeps the queue, and a failed session holds it until
+  it reconnects. Same in development, production and backup chats.
 - Provider integration through **adapters** behind one provider-agnostic API: a provider may offer
   several (Claude: **Claude SDK**, the default, and **Claude CLI**, which drives the Claude Code CLI
   natively; Codex: its SDK). Each adapter supports every session feature (streaming, questions,
