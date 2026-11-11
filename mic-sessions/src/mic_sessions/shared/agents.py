@@ -42,7 +42,7 @@ import shutil
 import subprocess
 import tempfile
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping, Sequence
 from contextlib import suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
@@ -50,7 +50,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Protocol, TypedDict, runtime_checkable
 from uuid import UUID, uuid4
 
-# The single import of a vendor SDK in the whole service belongs to the Claude SDK adapter, and a second provider's SDK must stay confined to its own adapter the same way. The Claude CLI adapter imports none: it drives the CLI through `claude_cli`; the Gemini adapters import none either: they drive the Gemini CLI through `gemini`.
+# The single import of a vendor SDK in the whole service belongs to the Claude SDK adapter, and a second provider's SDK must stay confined to its own adapter the same way. The Claude CLI adapter imports none: it drives the CLI through `claude_cli`; the Antigravity adapter imports none either: it drives the Antigravity CLI through `antigravity`.
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -80,7 +80,7 @@ from claude_agent_sdk import (
     UserMessage,
 )
 
-from mic_sessions.shared import claude_cli
+from mic_sessions.shared import antigravity, claude_cli
 from mic_sessions.shared.agent_conduct import conduct_instructions
 from mic_sessions.shared.browser import playwright_server
 from mic_sessions.shared.env import get_settings
@@ -2721,136 +2721,233 @@ class CodexAgentRuntime:
             await self._publish(tool_result(identity, failed, _result_summary(item)))
 
 
-# --- Gemini --------------------------------------------------------------------------------------
+# --- Antigravity ---------------------------------------------------------------------------------
 
-GEMINI_CAPABILITIES = AgentCapabilities(streaming=True, thinking=True, interrupt=True, images=True)
-# One headless process per turn: no thoughts in its stream and no image input, so it declares neither.
-GEMINI_CLI_CAPABILITIES = AgentCapabilities(streaming=True, interrupt=True)
+# Every session feature through the stream-json CLI: questions come back over the `PreToolUse` hook
+# bridge, images go in by path, thinking is read per completed step from the brain transcript. Like
+# the other adapters every tool runs without a card, so no permission requests; no side questions
+# (print mode has no isolated, tool-less fork of a conversation).
+ANTIGRAVITY_CAPABILITIES = AgentCapabilities(streaming=True, thinking=True, questions=True, interrupt=True,
+                                             images=True)
 
-_GEMINI_CONDUCT = conduct_instructions(edit_tools="the write_file and replace tools")
-# Every Gemini model the CLI routes to has a one-million-token window (the CLI's own `tokenLimit`).
-_GEMINI_CONTEXT_WINDOW = 1_048_576
-_GEMINI_COMPACTION = ("Gemini compresses its context by itself when the conversation grows; "
-                      "manual compaction is not available for Gemini sessions.")
-# Gemini tools -> the shared tool vocabulary and its input shape, so every provider renders alike.
-_GEMINI_TOOLS: dict[str, tuple[str, Callable[[dict[str, Any]], dict[str, Any]]]] = {
-    "run_shell_command": ("Bash", lambda args: {"command": args.get("command"), "description": args.get("description")}),
-    "read_file": ("Read", lambda args: {"file_path": args.get("file_path") or args.get("absolute_path")}),
-    "read_many_files": ("Read", lambda args: {"file_path": ", ".join(map(str, args.get("include") or []))}),
-    "write_file": ("Write", lambda args: {"file_path": args.get("file_path"), "content": args.get("content")}),
-    "replace": ("Edit", lambda args: {"file_path": args.get("file_path"), "old_string": args.get("old_string"),
-                                      "new_string": args.get("new_string")}),
-    "glob": ("Glob", lambda args: {"pattern": args.get("pattern"), "path": args.get("dir_path")}),
-    "grep_search": ("Grep", lambda args: {"pattern": args.get("pattern"), "path": args.get("dir_path"),
-                                          "glob": args.get("include_pattern")}),
-    "list_directory": ("LS", lambda args: {"path": args.get("dir_path")}),
-    "google_web_search": ("WebSearch", lambda args: {"query": args.get("query")}),
-    "web_fetch": ("WebFetch", lambda args: {"prompt": args.get("prompt"), "url": next(
-        (word for word in str(args.get("prompt") or "").split() if word.startswith(("http://", "https://"))), None)}),
-    "write_todos": ("TodoWrite", lambda args: {"todos": [
-        {"content": item.get("description"), "status": item.get("status")}
-        for item in args.get("todos") or [] if isinstance(item, dict)]}),
-    "activate_skill": ("Skill", lambda args: {"skill": args.get("name")}),
-    "invoke_agent": ("Agent", lambda args: {key: value for key, value in args.items() if isinstance(value, (str, int, float))}),
+# The tool names the model sees (`init.tools`); the stream reports the same calls by action name.
+_ANTIGRAVITY_CONDUCT = conduct_instructions(
+    edit_tools="the write_to_file, replace_file_content and multi_replace_file_content tools")
+_ANTIGRAVITY_GUIDANCE = (
+    "The session shows the user every image you open with the view_file tool. To deliver an image "
+    "(created, rendered, converted or captured), save it as a PNG, JPEG, WebP or GIF file and open it "
+    "with view_file.\n\n"
+    "Commands run without a terminal attached: prefer non-interactive flags (for example `--yes` or "
+    "`CI=1`) and never start a command that waits for keyboard input."
+)
+# agy tools (stream action names and `init.tools` names) -> the shared tool vocabulary.
+_ANTIGRAVITY_TOOLS = {
+    "run_command": "Bash", "read_file": "Read", "view_file": "Read", "view_file_outline": "Read",
+    "view_code_item": "Read", "write_file": "Write", "write_to_file": "Write", "edit_file": "Edit",
+    "replace_file_content": "Edit", "multi_replace_file_content": "Edit", "sed_file": "Edit",
+    "notebook_edit": "NotebookEdit", "list_dir": "LS", "grep_search": "Grep", "find_by_name": "Glob",
+    "search_web": "WebSearch", "read_url_content": "WebFetch", "read_url": "WebFetch",
 }
-# ACP reports a tool by kind, title and the files it touches, never by its name.
-_GEMINI_KINDS = {"read": "Read", "edit": "Edit", "delete": "Edit", "move": "Edit", "search": "Grep",
-                 "execute": "Bash", "fetch": "WebFetch", "think": "Think"}
+# File tools render as edits with their content: their `tool.use` waits for the full arguments the hook
+# received (the stream's parameters are abridged), at the latest until the step ends.
+_ANTIGRAVITY_EDIT_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
+_ANTIGRAVITY_PATH_KEYS = ("Path", "AbsolutePath", "TargetFile", "FilePath", "File", "path", "file_path")
+_ANTIGRAVITY_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+# Mooi's own record of every frame it received (plus its prompts, process starts and compactions): the
+# raw material of the Trace tab and of *Download log*. Bounded, so a runaway turn cannot fill the disk.
+_ANTIGRAVITY_FRAMES = "stream.jsonl"
+_ANTIGRAVITY_FRAMES_LIMIT = 64 * 1024 * 1024
+_ANTIGRAVITY_HOOK_ARGS_LIMIT = 256
+# How often the brain transcripts (thinking, delegated agents) are read while something is running, and
+# how long a delegated agent may stay silent outside a turn before it is no longer watched.
+_ANTIGRAVITY_POLL_SECONDS = 1.0
+_ANTIGRAVITY_IDLE_POLL_SECONDS = 3.0
+_ANTIGRAVITY_DELEGATION_IDLE_SECONDS = 15 * 60
 
 
-def _gemini_tool(name: str, args: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    mapped = _GEMINI_TOOLS.get(name)
-    if mapped is None:
-        return name or "Tool", args
-    tool, shape = mapped
-    return tool, {key: value for key, value in shape(args).items() if value not in (None, "", [])}
+def _antigravity_mapping(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
 
 
-def _gemini_acp_tool(update: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
-    """`(name, title, input)` of an ACP tool call in the shared vocabulary: the title is what Gemini
-    shows (a command line, a path, a query) and the first location is the file the call touches."""
-    kind = str(update.get("kind") or "other")
-    name = _GEMINI_KINDS.get(kind, "Tool")
-    title = str(update.get("title") or name)
-    locations = update.get("locations") if isinstance(update.get("locations"), list) else []
-    path = next((item.get("path") for item in locations if isinstance(item, dict) and item.get("path")), None)
-    diff = next((item for item in update.get("content") or [] if isinstance(item, dict) and item.get("type") == "diff"), None)
-    if diff is not None:
-        path = diff.get("path") or path
-        kind_meta = (diff.get("_meta") or {}).get("kind") if isinstance(diff.get("_meta"), dict) else None
-        name = "Write" if kind_meta == "add" else "Edit"
-        input_data: dict[str, Any] = {"file_path": path, "old_string": diff.get("oldText") or "",
-                                      "new_string": diff.get("newText") or ""}
-        if kind_meta == "delete" or kind == "delete":
-            input_data["operation"] = "delete"
-        return name, _tool_title(name, input_data), input_data
-    if name == "Bash":
-        input_data = {"command": title}
-    elif name in ("Read", "Edit"):
-        input_data = {"file_path": path or title}
-    elif name == "Grep":
-        input_data = {"pattern": title}
-    elif name == "WebFetch":
-        input_data = {"prompt": title}
+def _antigravity_value(params: Mapping[str, Any], *keys: str) -> Any:
+    return next((params[key] for key in keys if params.get(key) not in (None, "", [], {})), None)
+
+
+def _antigravity_tool(name: str, params: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
+    """`(name, input)` of an agy tool call in the shared vocabulary (`file_path`, `command`, `pattern`…),
+    so every provider renders a step alike; unknown tools keep their own name and parameters."""
+    shared = _ANTIGRAVITY_TOOLS.get(name)
+    if shared is None:
+        return name or "Tool", {key: value for key, value in params.items()
+                                if isinstance(value, (str, int, float, bool, list, dict))}
+    path = _antigravity_value(params, *_ANTIGRAVITY_PATH_KEYS)
+    input_data: dict[str, Any]
+    if shared == "Bash":
+        input_data = {"command": _antigravity_value(params, "CommandLine", "Command", "command"),
+                      "description": _antigravity_value(params, "toolSummary", "Description")}
+    elif shared == "Write":
+        input_data = {"file_path": path, "content": _antigravity_value(params, "Content", "CodeContent", "content")}
+    elif shared == "Edit":
+        chunks = params.get("ReplacementChunks")
+        edits = [{"old_string": str(chunk.get("TargetContent") or ""), "new_string": str(chunk.get("ReplacementContent") or "")}
+                 for chunk in chunks if isinstance(chunk, dict)] if isinstance(chunks, list) else []
+        if edits:
+            shared, input_data = "MultiEdit", {"file_path": path, "edits": edits}
+        else:
+            input_data = {"file_path": path,
+                          "old_string": _antigravity_value(params, "TargetContent", "OldString", "old_string"),
+                          "new_string": _antigravity_value(params, "ReplacementContent", "NewString", "new_string")}
+    elif shared in ("Read", "NotebookEdit"):
+        input_data = {"notebook_path" if shared == "NotebookEdit" else "file_path": path}
+    elif shared == "LS":
+        input_data = {"path": _antigravity_value(params, "DirectoryPath", *_ANTIGRAVITY_PATH_KEYS)}
+    elif shared == "Grep":
+        input_data = {"pattern": _antigravity_value(params, "Query", "Pattern", "SearchPattern"),
+                      "path": _antigravity_value(params, "SearchPath", "SearchDirectory", *_ANTIGRAVITY_PATH_KEYS)}
+    elif shared == "Glob":
+        input_data = {"pattern": _antigravity_value(params, "Pattern", "Query"),
+                      "path": _antigravity_value(params, "SearchDirectory", "SearchPath", *_ANTIGRAVITY_PATH_KEYS)}
+    elif shared == "WebSearch":
+        input_data = {"query": _antigravity_value(params, "query", "Query")}
     else:
-        input_data = {"title": title}
-    return name, title[:_TITLE_LIMIT], input_data
+        input_data = {"url": _antigravity_value(params, "Url", "URL", "url")}
+    return shared, {key: value for key, value in input_data.items() if value not in (None, "", [])}
 
 
-def _gemini_content_summary(content: Any) -> str:
-    """Readable text of ACP tool call content: its text blocks, or the diff it applied."""
+def _antigravity_answer(questions: Sequence[Mapping[str, Any]], payload: Mapping[str, Any]) -> str:
+    """The player's answers as the one text agy reads back from the hook's reason."""
+    answers = _antigravity_mapping(payload.get("answers"))
     parts = []
-    for item in content if isinstance(content, list) else []:
-        if not isinstance(item, dict):
-            continue
-        if item.get("type") == "content" and isinstance(item.get("content"), dict):
-            parts.append(_block_summary(item["content"]))
-        elif item.get("type") == "diff":
-            parts.append(f"Updated {item.get('path') or 'file'}")
-    return _result_summary("\n".join(part for part in parts if part))
+    for question in questions:
+        value = answers.get(str(question.get("question") or ""))
+        text = ", ".join(map(str, value)) if isinstance(value, list) else str(value or "")
+        parts.append(text if len(questions) == 1 else f"{question.get('question')}: {text}")
+    if payload.get("response"):
+        parts.append(str(payload["response"]))
+    return "\n".join(part for part in parts if part) or "(no answer)"
 
 
-class _GeminiRuntime:
-    """What both Gemini adapters share: the account's model catalog, the private Gemini home (settings,
-    credential, instructions and session logs, removed on close), usage, credential renewal and traces.
-    Subclasses implement the conversation over one of the CLI's two programmatic interfaces."""
+def _antigravity_reason(text: str) -> str | None:
+    """A user-facing reason for a known agy failure (its own wording, the API's, or a stderr line)."""
+    lowered = text.lower()
+    if any(word in lowered for word in ("authentication", "unauthenticated", "log in", "login", "sign in", "401")):
+        return "Antigravity needs the account to sign in with Google again. Reconnect it in your agent accounts."
+    if any(word in lowered for word in ("quota", "resource_exhausted", "rate limit", "429", "usage limit")):
+        return "Antigravity reports that this account reached its usage limit. Try again later or switch model."
+    if "model" in lowered and any(word in lowered for word in ("unknown", "not available", "has no", "conflicts")):
+        return "The selected Antigravity model or effort is not available for this account. Choose another one."
+    return None
 
-    capabilities: ClassVar[AgentCapabilities] = GEMINI_CAPABILITIES
-    _catalog: ClassVar[ContextVar[dict[str, Any] | None]] = ContextVar('gemini_catalog', default=None)
-    _label: ClassVar[str] = "Gemini"
+
+def _antigravity_message(text: str) -> str:
+    return _antigravity_reason(text) or "Antigravity could not complete the turn. Retry, or check your account and selected model."
+
+
+def _antigravity_failure(error: BaseException) -> str:
+    if isinstance(error, antigravity.AntigravityError):
+        reason = _antigravity_reason(error.detail)
+        if reason:
+            return reason
+        if "sign" in error.cause:
+            return "The Antigravity sign-in is no longer valid. Sign in with Google again in your agent accounts."
+        return f"Antigravity could not continue ({error.cause}). Check your account connection and try again."
+    return "Antigravity could not complete the turn. Check your account connection and try again."
+
+
+def _antigravity_usage(previous: Mapping[str, Any], current: Mapping[str, Any]) -> dict[str, Any] | None:
+    """One turn's tokens: agy reports the conversation's running totals, so a turn is the difference."""
+    def delta(key: str) -> int | None:
+        now, before = current.get(key), previous.get(key) or 0
+        return max(0, now - before) if isinstance(now, int) and isinstance(before, int) else None
+    usage = {"input_tokens": delta("input_tokens"), "output_tokens": delta("output_tokens"),
+             "cache_read_input_tokens": delta("cache_read_tokens"), "thinking_tokens": delta("thinking_tokens")}
+    return usage if any(value is not None for value in usage.values()) else None
+
+
+@dataclass
+class _AntigravityDelegation:
+    """One agent agy delegated to (`invoke_subagent`): its card, its transcript and its open steps."""
+
+    tool_use_id: str
+    reader: antigravity.TranscriptReader
+    tools: list[str]
+    seen_at: float
+    done: bool = False
+
+
+class AntigravityCliAgentRuntime:
+    """Antigravity through its own CLI (`agy -p= --input-format stream-json --output-format stream-json`).
+
+    One long-lived process per session takes one turn per stdin line (Mooi's queue stays the only queue)
+    and prints `init` / `step_update` / `result` frames. Print mode has a single data-directory knob, so
+    the session owns a private `HOME` (sign-in bundle, conversations, brain transcripts, Mooi's
+    instructions and its `PreToolUse` hook), removed on close. Everything the stream cannot do runs as a
+    one-shot process on that home while no stream process holds the conversation (agy does not lock it):
+    compaction (`/compact`), and the model or effort, which are launch flags, so a change relaunches the
+    process resuming the conversation (`--conversation`). Interrupt is a Ctrl-C that ends the process;
+    the next one resumes. agy renews its Google sign-in itself, so the bundle is written back to the
+    platform after every process exit.
+    """
+
+    capabilities: ClassVar[AgentCapabilities] = ANTIGRAVITY_CAPABILITIES
+    _catalog: ClassVar[ContextVar[dict[str, Any] | None]] = ContextVar('antigravity_catalog', default=None)
+    _catalogs: ClassVar[dict[str, tuple[float, dict[str, Any]]]] = {}
 
     @classmethod
     async def load_configuration(cls, credential: Credential, refresh: bool = False) -> None:
-        from mic_sessions.shared import gemini
+        """The account's models as `agy models` lists them, from a throwaway home holding its sign-in."""
+        cached = cls._catalogs.get(credential.connection_id or '')
+        if not refresh and cached and cached[0] > time.monotonic():
+            cls._catalog.set(cached[1])
+            return
         settings = get_settings()
-        with tempfile.TemporaryDirectory(prefix="mooi-gemini-models-") as scratch:
+        with tempfile.TemporaryDirectory(prefix="mooi-agy-models-") as scratch:
+            home = Path(scratch)
             try:
-                entries = await gemini.models(credential, settings.agent_gemini_cli, Path(scratch), refresh=refresh)
+                await asyncio.to_thread(antigravity.prepare_home, home, credential, browser=False, hooks=False)
+                models = await antigravity.models(settings.agent_antigravity_cli, home,
+                                                  env=antigravity.environment(home), refresh=True)
+            except antigravity.AntigravityError as error:
+                LOG.warning("Could not load Antigravity models: %s", error.cause)
+                raise ApiException(502, _antigravity_failure(error)) from None
             except Exception:
-                LOG.warning("Could not load Gemini models", exc_info=True)
-                raise ApiException(502, "Could not load Gemini models. Check your account connection and try again.") from None
-        models = [{"id": entry["id"], "label": entry["label"], "contextWindow": _GEMINI_CONTEXT_WINDOW,
-                   "efforts": [], "images": True} for entry in entries]
+                LOG.exception("Could not load Antigravity models")
+                raise ApiException(502, "Could not load Antigravity models. Check your account connection and try again.") from None
+            finally:
+                await _antigravity_write_back(home, credential)
         if not models:
-            raise ApiException(502, "Gemini returned no available models. Check your account connection and try again.")
-        preferred = settings.agent_gemini_model
-        default = next((item for item in models if item["id"] == preferred), models[0])
-        cls._catalog.set({"id": "gemini", "label": "Gemini", "models": models,
-                          "defaultModel": default["id"], "defaultEffort": None})
+            raise ApiException(502, "Antigravity returned no available models. Check your account connection and try again.")
+        default = next((item for item in models if item["id"] == settings.agent_antigravity_model), models[0])
+        catalog = {"id": "antigravity", "label": "Antigravity", "models": models,
+                   "defaultModel": default["id"], "defaultEffort": settings.agent_antigravity_effort}
+        if credential.connection_id:
+            for key, (expires, _) in list(cls._catalogs.items()):
+                if expires < time.monotonic():
+                    cls._catalogs.pop(key, None)
+            if len(cls._catalogs) >= 1024:
+                cls._catalogs.pop(next(iter(cls._catalogs)))
+            cls._catalogs[credential.connection_id] = (time.monotonic() + 300, catalog)
+        cls._catalog.set(catalog)
 
     @classmethod
     def configuration(cls) -> dict[str, Any]:
-        return cls._catalog.get() or {"id": "gemini", "label": "Gemini", "models": [],
+        return cls._catalog.get() or {"id": "antigravity", "label": "Antigravity", "models": [],
                                       "defaultModel": "", "defaultEffort": None}
 
     @classmethod
     def configure(cls, model: str | None, effort: str | None) -> AgentConfig:
-        """Gemini has no per-request effort: the CLI sets each model's thinking itself, so none is kept."""
+        """A base model (`gemini-4-argon`) and one of its efforts: agy resolves `<base>-<effort>`."""
         catalog = cls.configuration()
         chosen = model or catalog["defaultModel"]
-        if not any(item["id"] == chosen for item in catalog["models"]):
-            raise ApiException.bad_request("Unsupported Gemini model; refresh the model list")
-        return AgentConfig(chosen, None)
+        entry = next((item for item in catalog["models"] if item["id"] == chosen), None)
+        if entry is None:
+            raise ApiException.bad_request("Unsupported Antigravity model; refresh the model list")
+        supported = entry["efforts"]
+        preferred = catalog.get("defaultEffort") if chosen == catalog["defaultModel"] else None
+        value = effort if effort is not None else preferred if preferred in supported else entry.get("defaultEffort")
+        if value is not None and value not in supported:
+            raise ApiException.bad_request("Unsupported effort for this model")
+        return AgentConfig(chosen, value)
 
     def __init__(self, credential: Credential, workspace: Path, branch: str, emit: Emit, ask: Ask,
                  config: AgentConfig, *, instructions: str = "", environment: Mapping[str, str] | None = None) -> None:
@@ -2859,92 +2956,792 @@ class _GeminiRuntime:
         self._instructions = instructions
         self._environment = dict(environment or {})
         self._home: Path | None = None
-        self._task: asyncio.Task[None] | None = None
+        # The sign-in bundle the home holds as far as this runtime knows (written or read back).
+        self._home_token: str | None = None
+        self._credential_lock = asyncio.Lock()
+        self._bridge: antigravity.HookBridge | None = None
+        self._stream: antigravity.Stream | None = None
+        self._stream_config: AgentConfig | None = None
+        self._streams: set[antigravity.Stream] = set()
+        # Streams this runtime is ending on purpose (close, interrupt, relaunch): their exit is no failure.
+        self._stopping: set[antigravity.Stream] = set()
+        self._pumps: dict[antigravity.Stream, asyncio.Task[None]] = {}
+        self._stream_lock = asyncio.Lock()
+        self._recovery_lock = asyncio.Lock()
+        self._tasks: set[asyncio.Task[Any]] = set()
+        self._watch: asyncio.Task[None] | None = None
+        self._pending: dict[str, _PendingRequest] = {}
+        self._conversation_id: str | None = None
+        # A conversation is resumed (`--conversation`) only once a turn ended in it.
+        self._conversation_saved = False
+        self._turn_active = False
+        self._turn_started = 0.0
         self._interrupted = False
         self._closing = False
+        self._totals: dict[str, Any] = {}
         self._last_quota: dict[str, Any] | None = None
-        # Gemini conversation ids this runtime used, oldest first: each one names a session log.
-        self._session_ids: list[str] = []
+        # Stream step index -> (message id, text so far) of an assistant response still streaming.
+        self._messages: dict[int, tuple[str, list[str]]] = {}
+        # Stream step index -> tool call id of a step whose `tool.use` is out and whose result is not.
+        self._open_tools: dict[int, str] = {}
+        # Stream step index -> (call id, name, parameters) of a file step waiting for its full arguments.
+        self._deferred_tools: dict[int, tuple[str, str, dict[str, Any]]] = {}
+        # (conversation id, step index) -> (tool name, full arguments) the hook received.
+        self._hook_args: dict[tuple[str, int], tuple[str, dict[str, Any]]] = {}
+        self._delegations: dict[str, _AntigravityDelegation] = {}
+        self._thinking: antigravity.TranscriptReader | None = None
+        self._transcript_lock = asyncio.Lock()
+        self._frames: Any = None
+        self._frames_bytes = 0
 
-    async def _publish(self, event: AgentEvent) -> None:
-        await self._emit(event["type"], event["data"])
+    # --- lifecycle ---
 
-    def _binary(self) -> str:
-        from mic_sessions.shared import gemini
-        return gemini.executable(get_settings().agent_gemini_cli)
-
-    async def _prepare(self) -> None:
-        """Validates the checkout and writes the private home, outside the checkout but inside the owned
-        session directory, so workspace reconciliation removes it after an unclean service exit."""
-        from mic_sessions.shared import gemini
-        self._workspace = await asyncio.to_thread(_validate_agent_workspace, self._workspace, self._branch)
+    async def start(self) -> None:
+        started_at = time.perf_counter()
+        self._workspace = await asyncio.to_thread(self._validate_workspace)
         if self._home is None:
-            self._home = Path(tempfile.mkdtemp(prefix="gemini-", dir=self._workspace.parent))
-        instructions = "\n\n".join(filter(None, [_GEMINI_CONDUCT, self._instructions]))
-        await asyncio.to_thread(gemini.prepare_home, self._home, self._credential, instructions=instructions,
-                                environment=self._environment)
+            self._home = await asyncio.to_thread(self._create_home)
+        instructions = "\n\n".join(filter(None, [_ANTIGRAVITY_CONDUCT, _ANTIGRAVITY_GUIDANCE, self._instructions]))
+        try:
+            await asyncio.to_thread(antigravity.prepare_home, self._home, self._credential, instructions=instructions)
+            self._home_token = self._credential.token
+            if self._bridge is None:
+                self._bridge = antigravity.HookBridge(self._on_hook)
+            await self._bridge.start()
+            await asyncio.to_thread(self._open_frames)
+            async with self._stream_lock:
+                await asyncio.gather(self._launch(), self._refresh_quota())
+        except antigravity.AntigravityError as error:
+            await self._publish(agent_error(_antigravity_failure(error)))
+            raise
+        await self._emit_context(0)
+        LOG.info("Antigravity CLI runtime connected in %.0f ms", (time.perf_counter() - started_at) * 1000)
 
-    def _process_env(self) -> dict[str, str]:
-        from mic_sessions.shared import gemini
-        if self._home is None:
-            raise RuntimeError("The Gemini runtime home was not prepared")
-        return gemini.environment(self._home, self._credential, self._environment)
+    async def close(self) -> None:
+        self._closing = True
+        for task in (self._watch, *self._tasks):
+            if task is not None and task is not asyncio.current_task():
+                task.cancel()
+        await asyncio.gather(*(task for task in (self._watch, *self._tasks)
+                               if task is not None and task is not asyncio.current_task()), return_exceptions=True)
+        await self._deny_pending("The session was closed")
+        if self._bridge is not None:
+            self._bridge.deny_pending("The session was closed")
+        for stream in tuple(self._streams):
+            self._stopping.add(stream)
+            # Briefly, then terminated (an interrupt, for agy, which saves the conversation): close()
+            # always ends the process (the group is killed last), so the workspace is free.
+            await stream.close(timeout=2)
+        for pump in tuple(self._pumps.values()):
+            if pump is not asyncio.current_task():
+                pump.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await pump
+        self._stream = None
+        if self._bridge is not None:
+            await self._bridge.close()
+        await self._sync_credential()
+        self._close_frames()
+        await self._cleanup_home()
 
-    async def _emit_context(self, used: int | None, limit: int | None = None) -> None:
-        window = limit or _GEMINI_CONTEXT_WINDOW
-        await self._emit("session.usage", {"context": {
-            "percent": used / window * 100 if used is not None and window else None,
-            "usedTokens": used, "limitTokens": window, "updatedAt": time.time()}})
+    async def recover(self) -> None:
+        """Relaunches the CLI resuming the conversation. Serialized: the failed pump and a failed delivery
+        may both try at once."""
+        if self._closing:
+            raise ApiException.conflict("Antigravity session is closed")
+        async with self._recovery_lock:
+            if self._home is None or self._bridge is None:
+                await self.start()
+                return
+            await self._deny_pending(_INTERRUPTED_MESSAGE)
+            self._bridge.deny_pending(_INTERRUPTED_MESSAGE)
+            async with self._stream_lock:
+                # A process that is up on the current configuration (a message relaunched it meanwhile) stays.
+                await self._ensure_stream()
+            self._turn_active = False
+            self._interrupted = False
+            await self._close_open_steps()
 
-    async def _refresh_quota(self, *, refresh: bool = False) -> None:
-        from mic_sessions.shared import gemini
-        quota = await gemini.quota(self._credential, refresh=refresh)
-        if quota != self._last_quota:
-            self._last_quota = quota
-            await self._emit("session.usage", {"quota": quota})
+    async def _recover_stream(self, error: BaseException) -> None:
+        """A broken process loses only its running turn: relaunch with backoff, resuming the
+        conversation, and fail the session only when every attempt does. Runs on the failed pump."""
+        LOG.error("The Antigravity CLI stream failed: %s", getattr(error, "cause", None) or type(error).__name__)
+        turn_active = self._turn_active
+        await self._deny_pending(_INTERRUPTED_MESSAGE)
+        if self._bridge is not None:
+            self._bridge.deny_pending(_INTERRUPTED_MESSAGE)
+        await self._close_open_steps()
+        cause = error.cause if isinstance(error, antigravity.AntigravityError) else "the agent stream broke"
+        reason = _antigravity_reason(error.detail) if isinstance(error, antigravity.AntigravityError) else None
+        await self._publish(agent_error(reason or (
+            f"{_INTERRUPTED_MESSAGE} ({cause}). Restoring the conversation; the workspace and its changes are kept.")))
+        attempts = get_settings().agent_recovery_attempts
+        for attempt in range(attempts):
+            if attempt:
+                await asyncio.sleep(2 ** attempt)
+            try:
+                await self.recover()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOG.warning("Antigravity CLI relaunch attempt %s/%s failed", attempt + 1, attempts, exc_info=True)
+                continue
+            LOG.info("Antigravity CLI stream recovered after %s attempt(s)", attempt + 1)
+            await self._emit("agent.activity", {
+                "kind": "stream_recovered",
+                "description": "Reconnected and restored the conversation. Send a message to continue.",
+            })
+            if turn_active:
+                await self._publish(turn_result("error", subtype="stream_interrupted"))
+            return
+        self._turn_active = False
+        await self._publish(session_status(STATUS_FAILED, RECOVERABLE_DETAIL))
+
+    # --- conversation ---
+
+    async def send(self, text: str, images: Sequence[Image] = ()) -> None:
+        if self._closing or self._home is None:
+            raise ApiException.conflict("Antigravity session is closed")
+        if self._turn_active:
+            raise ApiException.conflict("An Antigravity turn is already running")
+        started_at = time.perf_counter()
+        async with self._stream_lock:
+            stream = await self._ensure_stream()
+        prompt = await asyncio.to_thread(self._prompt, text, images)
+        # Whatever the transcripts still hold belongs to the previous turn, which has already ended.
+        await self._poll_transcripts(publish=False)
+        self._interrupted = False
+        self._turn_active = True
+        self._turn_started = time.monotonic()
+        self._record({"event": "mooi.user", "text": prompt})
+        try:
+            await stream.send(prompt)
+        except BaseException:
+            self._turn_active = False
+            raise
+        self._start_watch()
+        LOG.info("Antigravity CLI turn submitted in %.0f ms", (time.perf_counter() - started_at) * 1000)
+
+    def _prompt(self, text: str, images: Sequence[Image]) -> str:
+        """Stream-json input is text only: each image is saved in the home's private attachment directory,
+        which the agent may read, and named in the prompt for it to open. Blocking."""
+        if not images or self._home is None:
+            return text
+        paths = [antigravity.save_attachment(self._home, image.path.read_bytes(), image.path.suffix or ".png")
+                 for image in images]
+        note = ("The user attached these images. Open each one with the view_file tool before you answer:\n"
+                + "\n".join(f"- {path}" for path in paths))
+        return f"{text}\n\n{note}" if text else note
+
+    async def interrupt(self) -> None:
+        """A Ctrl-C: agy ends the turn (`interrupted`) and exits; the conversation stays and the next
+        process resumes it, launched right away so the next message does not wait for it."""
+        self._interrupted = True
+        await self._deny_pending("The turn was interrupted")
+        if self._bridge is not None:
+            self._bridge.deny_pending("The turn was interrupted")
+        stream = self._stream
+        if stream is None or not stream.alive or not self._turn_active:
+            return
+        self._stopping.add(stream)
+        await stream.interrupt()
+        self._spawn(self._relaunch())
+
+    async def compact(self, instructions: str | None = None) -> None:
+        """agy's `/compact` as a one-shot process on the conversation, once the stream process exited
+        (slash commands end a stream session and agy does not lock a conversation). It summarizes the
+        conversation into a checkpoint the next process resumes from. agy takes no instructions for it."""
+        if self._closing or self._home is None:
+            raise ApiException.conflict("Antigravity session is closed")
+        if not self._conversation_saved or self._conversation_id is None:
+            raise ApiException.conflict("There is no conversation to compact yet")
+        if self._turn_active:
+            raise ApiException.conflict("An Antigravity turn is still running")
+        if instructions:
+            LOG.info("Antigravity compaction takes no instructions; compacting without them")
+        async with self._stream_lock:
+            if self._stream is not None:
+                await self._retire(self._stream)
+                self._stream = None
+            await self._restore_credential()
+            self._record({"event": "mooi.compact", "phase": "started", "conversation_id": self._conversation_id})
+            try:
+                result = await antigravity.compact(
+                    self._binary(), self._home, self._conversation_id, cwd=self._workspace, env=self._process_env(),
+                    model=self._config.model, effort=self._config.effort)
+            finally:
+                await self._sync_credential()
+            self._record({"event": "mooi.compact", "phase": "completed", "result": result})
+            if isinstance(result.get("usage"), dict):
+                self._totals = result["usage"]
+        await self._emit("session.usage", {"context": None})
+        self._spawn(self._relaunch())
+        self._spawn(self._refresh_quota(refresh=True))
+
+    async def set_configuration(self, config: AgentConfig) -> AgentConfig:
+        """Model and effort are launch flags: a change relaunches the process on the conversation."""
+        if config == self._config:
+            return self._config
+        self._config = config
+        if not self._turn_active and self._home is not None and not self._closing:
+            async with self._stream_lock:
+                await self._ensure_stream()
+            self._spawn(self._refresh_quota())
+        return self._config
+
+    async def refresh_credential(self, credential: Credential) -> None:
+        """agy renews its sign-in itself and this runtime writes it back; a different bundle from the
+        platform (another session's renewal) replaces the home's at the next process launch."""
+        if credential.connection_id != self._credential.connection_id:
+            raise ApiException.conflict("The Antigravity account changed. Create a new session.")
+        if credential.token != self._credential.token:
+            self._credential = credential
 
     async def refresh_usage(self) -> None:
         if not self._closing:
             await self._refresh_quota()
 
-    async def refresh_credential(self, credential: Credential) -> None:
-        """The platform renews the Google sign-in before each turn. A live CLI keeps renewing on its own
-        with the shared refresh token, so the renewed grant only replaces the cached one on disk."""
-        from mic_sessions.shared import gemini
-        if credential.connection_id != self._credential.connection_id:
-            raise ApiException.conflict("The Gemini account changed. Create a new session.")
-        self._credential = credential
-        if self._home is not None:
-            await asyncio.to_thread(gemini.write_credential, self._home, credential)
-
-    async def set_configuration(self, config: AgentConfig) -> AgentConfig:
-        self._config = config
-        return config
-
-    async def compact(self, instructions: str | None = None) -> None:
-        raise ApiException.conflict(_GEMINI_COMPACTION)
-
     async def aside(self, question: str) -> AsyncIterator[str]:
-        raise ApiException.conflict("Side questions are not available for Gemini sessions")
+        raise ApiException.conflict("Side questions are not available for Antigravity sessions")
         yield ""  # pragma: no cover - makes this an async generator like the protocol's
 
     def trace_sources(self) -> Sequence[TraceSource]:
-        """Each conversation's session log under the private home (its sub-agent logs sit beside it)."""
-        from mic_sessions.shared import gemini
-        if self._home is None:
-            return []
-        logs = (gemini.find_log(self._home, session_id) for session_id in self._session_ids)
-        return [TraceSource("gemini", path) for path in logs if path is not None]
+        """Mooi's frame record in the private home; agy's own logs and brain transcripts sit beside it
+        (`antigravity.session_logs`)."""
+        return [TraceSource("antigravity", self._frames_path())] if self._home is not None else []
 
-    async def _context_from_log(self, session_id: str | None) -> None:
-        from mic_sessions.shared import gemini
-        if self._home is None or session_id is None:
+    async def resolve(self, request_id: str, payload: dict[str, Any]) -> None:
+        """Answers one parked request. Unknown or already answered ids are indistinguishable on
+        purpose — both mean there is nothing left to answer."""
+        pending = self._pending.get(request_id)
+        if pending is None or pending.future.done():
+            raise ApiException.not_found("Unknown or already answered request")
+        pending.future.set_result(payload)
+        if pending.kind == _KIND_QUESTION:
+            await self._publish(question_resolved(request_id, payload.get("answers") or {}))
+        else:
+            await self._publish(permission_resolved(request_id, payload.get("decision") or "allow"))
+
+    # --- processes ---
+
+    def _binary(self) -> str:
+        return antigravity.executable(get_settings().agent_antigravity_cli)
+
+    def _validate_workspace(self) -> Path:
+        return _validate_agent_workspace(self._workspace, self._branch)
+
+    def _create_home(self) -> Path:
+        """Outside the checkout, inside the owned session directory: workspace reconciliation removes it
+        after an unclean service exit."""
+        return Path(tempfile.mkdtemp(prefix="antigravity-", dir=self._workspace.parent))
+
+    def _process_env(self) -> dict[str, str]:
+        if self._home is None:
+            raise RuntimeError("The Antigravity runtime home was not prepared")
+        return antigravity.environment(self._home, self._environment,
+                                       hook_socket=self._bridge.path if self._bridge is not None else None)
+
+    async def _ensure_stream(self) -> antigravity.Stream:
+        """The live process on the current configuration, relaunched when it exited or the model or effort
+        changed. The caller holds the stream lock."""
+        stream = self._stream
+        if stream is not None and stream.alive and self._stream_config == self._config:
+            return stream
+        if stream is not None:
+            await self._retire(stream)
+            self._stream = None
+        return await self._launch()
+
+    async def _launch(self) -> antigravity.Stream:
+        """Starts a process on the conversation (resumed once saved) and waits for its `init`. The caller
+        holds the stream lock."""
+        if self._home is None:
+            raise RuntimeError("The Antigravity runtime home was not prepared")
+        workspace = await asyncio.to_thread(self._validate_workspace)
+        if workspace != self._workspace:
+            raise RuntimeError("The session workspace changed during the conversation")
+        await self._restore_credential()
+        config = self._config
+        stream = antigravity.Stream(self._binary(), self._home, cwd=self._workspace, env=self._process_env(),
+                                    model=config.model, effort=config.effort,
+                                    conversation_id=self._conversation_id if self._conversation_saved else None)
+        self._streams.add(stream)
+        try:
+            await stream.start()
+            await stream.ready()
+        except BaseException:
+            self._stopping.add(stream)
+            await stream.close()
+            self._streams.discard(stream)
+            self._stopping.discard(stream)
+            await self._sync_credential()
+            raise
+        self._stream, self._stream_config = stream, config
+        if stream.conversation_id and stream.conversation_id != self._conversation_id:
+            self._conversation_id = stream.conversation_id
+            self._thinking = antigravity.TranscriptReader(antigravity.transcript(self._home, stream.conversation_id))
+        self._record({"event": "mooi.process", "phase": "started", "conversation_id": stream.conversation_id,
+                      "model": config.model, "effort": config.effort, "resumed": self._conversation_saved})
+        self._pumps[stream] = asyncio.create_task(self._pump(stream))
+        return stream
+
+    async def _retire(self, stream: antigravity.Stream) -> None:
+        """Ends a process on purpose (stdin closed, so a turn still running gets time to finish) and waits
+        for its pump to wind down."""
+        self._stopping.add(stream)
+        await stream.close()
+        pump = self._pumps.get(stream)
+        if pump is not None and pump is not asyncio.current_task():
+            with suppress(asyncio.CancelledError, Exception):
+                await asyncio.wait_for(asyncio.shield(pump), 10)
+
+    async def _relaunch(self) -> None:
+        """Brings the next process up in the background after an interrupt or a compaction."""
+        try:
+            async with self._stream_lock:
+                if not self._closing:
+                    await self._ensure_stream()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # The next message relaunches it again (and recovers when that fails too).
+            LOG.warning("The Antigravity CLI could not be relaunched in the background", exc_info=True)
+
+    async def _pump(self, stream: antigravity.Stream) -> None:
+        """Translates one process's frames until it exits; an exit nobody asked for is recovered."""
+        failure: BaseException | None = None
+        try:
+            async for frame in stream.events():
+                await self._translate(stream, frame)
+        except asyncio.CancelledError:
+            self._pumps.pop(stream, None)
+            raise
+        except Exception as error:
+            # A frame that could not be translated or a broken stream: recovered below like an exit.
+            LOG.debug("The Antigravity CLI stream ended with an error", exc_info=True)
+            failure = error
+        self._pumps.pop(stream, None)
+        self._streams.discard(stream)
+        expected = stream in self._stopping or self._closing
+        self._stopping.discard(stream)
+        # A replacement first launches its successor, then ends this process: never let an obsolete
+        # process fail a session its successor has taken over.
+        crashed = not expected and stream is self._stream
+        if crashed:
+            self._stream = None
+        self._record({"event": "mooi.process", "phase": "exited", "conversation_id": stream.conversation_id,
+                      "returncode": stream.returncode, "expected": expected})
+        await self._sync_credential()
+        if self._closing:
             return
-        log = await asyncio.to_thread(gemini.find_log, self._home, session_id)
-        if log is not None:
-            used, _ = await asyncio.to_thread(gemini.last_context, log)
-            if used is not None:
-                await self._emit_context(used)
+        if expected and self._turn_active and self._stream in (stream, None):
+            # The process ended before its turn's `result` (killed after an interrupt).
+            await self._finish_turn("interrupted" if self._interrupted else "error")
+        elif crashed:
+            await self._recover_stream(failure or stream.failure or antigravity.AntigravityError("the agent process exited"))
+
+    async def _restore_credential(self) -> None:
+        """Writes the platform's bundle into the home when it differs from what the home holds."""
+        if self._home is None or self._credential.token == self._home_token:
+            return
+        await asyncio.to_thread(antigravity.write_credential, self._home, self._credential)
+        self._home_token = self._credential.token
+
+    async def _sync_credential(self) -> None:
+        """D5 write-back: once a process exited, agy's renewed sign-in replaces the platform's copy, so the
+        account's later sessions start with it. A signed-out home never overwrites the stored bundle."""
+        if self._home is None:
+            return
+        async with self._credential_lock:
+            try:
+                bundle = await asyncio.to_thread(antigravity.read_credential, self._home)
+            except antigravity.AntigravityError as error:
+                LOG.warning("The Antigravity sign-in could not be read back: %s", error.detail)
+                return
+            if bundle is None or bundle == self._home_token:
+                return
+            self._home_token = bundle
+            if bundle == self._credential.token:
+                return
+            self._credential = replace(self._credential, token=bundle)
+            if self._credential.save is None:
+                return
+            try:
+                await self._credential.save(bundle)
+            except Exception:
+                LOG.warning("The renewed Antigravity sign-in could not be saved", exc_info=True)
+
+    # --- hook bridge ---
+
+    async def _on_hook(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Every tool call agy is about to run. Like the other adapters tools run without a card; only the
+        agent's own questions wait for the player, whose answer goes back as the hook's reason."""
+        name, args, _, step = antigravity.tool_call(payload)
+        conversation = payload.get("conversationId")
+        if step is not None and isinstance(conversation, str) and name != antigravity.QUESTION_TOOL:
+            if len(self._hook_args) >= _ANTIGRAVITY_HOOK_ARGS_LIMIT:
+                self._hook_args.pop(next(iter(self._hook_args)))
+            self._hook_args[(conversation, step)] = (name, args)
+        if self._closing or self._interrupted:
+            return antigravity.deny("The turn was interrupted")
+        asked = antigravity.questions(payload)
+        if asked is None:
+            return antigravity.allow()
+        questions = [{"question": str(item.get("question") or ""), "header": "Question",
+                      "multiSelect": bool(item.get("is_multi_select")),
+                      "options": [{"label": str(option.get("label") if isinstance(option, dict) else option),
+                                   "description": str(option.get("description") or "") if isinstance(option, dict) else ""}
+                                  for option in item.get("options") or []]}
+                     for item in asked if item.get("question")]
+        if not questions:
+            return antigravity.allow()
+        request_id = uuid4().hex
+        future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        self._pending[request_id] = _PendingRequest(_KIND_QUESTION, future)
+        try:
+            await self._publish(question_request(request_id, questions))
+            await self._ask(QuestionRequest(request_id, questions))
+            answer = await future
+        except asyncio.CancelledError:
+            # The bridge gave up on the call (stop, timeout): the card must not outlive it.
+            if request_id in self._pending and not future.done():
+                self._pending.pop(request_id, None)
+                await self._emit(f"{_KIND_QUESTION}.resolved", {
+                    "requestId": request_id, "decision": "deny", "message": "The question expired"})
+            raise
+        except Exception:
+            LOG.exception("The Antigravity question %s could not be answered", request_id)
+            return antigravity.deny(_DENIED_MESSAGE)
+        finally:
+            self._pending.pop(request_id, None)
+        if answer.get("decision") == "deny":
+            return antigravity.deny(str(answer.get("message") or "The user declined to answer"))
+        return antigravity.answer(_antigravity_answer(questions, answer))
+
+    async def _deny_pending(self, message: str) -> None:
+        for request_id, pending in list(self._pending.items()):
+            if not pending.future.done():
+                pending.future.set_result({"decision": "deny", "message": message})
+                await self._emit(f"{pending.kind}.resolved", {
+                    "requestId": request_id, "decision": "deny", "message": message,
+                })
+            self._pending.pop(request_id, None)
+
+    # --- frames ---
+
+    async def _publish(self, event: AgentEvent) -> None:
+        await self._emit(event["type"], event["data"])
+
+    async def _translate(self, stream: antigravity.Stream, frame: dict[str, Any]) -> None:
+        self._record(frame)
+        kind = frame.get("event")
+        if kind == "step_update" and isinstance(frame.get("step_update"), dict):
+            await self._on_step(stream, frame["step_update"])
+        elif kind == "result" and isinstance(frame.get("result"), dict):
+            await self._on_result(stream, frame["result"])
+
+    async def _on_step(self, stream: antigravity.Stream, step: dict[str, Any]) -> None:
+        index = step.get("step_index")
+        if not isinstance(index, int):
+            return
+        kind, state = step.get("step_type"), step.get("state")
+        if kind == "agent_response":
+            await self._on_response(index, state, step)
+        elif kind == "tool":
+            await self._on_tool(stream, index, state, step)
+        elif kind == "subagent":
+            await self._on_subagent(index, state, step)
+        elif kind == "checkpoint" and state == "DONE":
+            await self._emit("agent.activity", {"kind": "compact_boundary",
+                                                "description": "Antigravity compacted the conversation context."})
+        # `user_input`, `system_message` and `unknown` (a question, answered through the hook) show nothing.
+
+    async def _on_response(self, index: int, state: Any, step: dict[str, Any]) -> None:
+        delta = step.get("text_delta")
+        if isinstance(delta, str) and delta:
+            message_id, parts = self._messages.setdefault(index, (f"agy-{uuid4().hex}", []))
+            parts.append(delta)
+            await self._publish(assistant_delta(message_id, delta))
+        if state not in ("DONE", "ERROR"):
+            return
+        message = self._messages.pop(index, None)
+        if message is not None:
+            await self._publish(assistant_message(message[0], "".join(message[1])))
+        usage = _antigravity_mapping(step.get("usage"))
+        used = usage.get("input_tokens")
+        if isinstance(used, int) and used > 0:
+            output = usage.get("output_tokens")
+            await self._emit_context(used + (output if isinstance(output, int) else 0))
+        await self._poll_transcripts()
+
+    async def _on_tool(self, stream: antigravity.Stream, index: int, state: Any, step: dict[str, Any]) -> None:
+        info = _antigravity_mapping(step.get("tool_info"))
+        name = str(info.get("name") or step.get("tool_name") or "")
+        params = _antigravity_mapping(info.get("parameters"))
+        done = state in ("DONE", "ERROR")
+        identity = self._open_tools.get(index)
+        if identity is None:
+            deferred = self._deferred_tools.get(index)
+            if deferred is not None and not done:
+                return
+            identity = deferred[0] if deferred is not None else f"agy-{uuid4().hex}"
+            shared, input_data = _antigravity_tool(name, params)
+            if shared in _ANTIGRAVITY_EDIT_TOOLS:
+                if not done:
+                    self._deferred_tools[index] = (identity, name, params)
+                    return
+                self._deferred_tools.pop(index, None)
+                hooked = self._hook_args.pop((stream.conversation_id or "", index), None)
+                if hooked is not None:
+                    shared, input_data = _antigravity_tool(*hooked)
+            self._open_tools[index] = identity
+            await self._publish(tool_use(identity, shared, _tool_title(shared, input_data), input_data))
+        if not done:
+            return
+        self._open_tools.pop(index, None)
+        error = _antigravity_mapping(info.get("error"))
+        failed = state == "ERROR"
+        output = info.get("output")
+        summary = (str(error.get("message") or "The step failed") if failed
+                   else output if isinstance(output, str) and output else "Done")
+        images = [] if failed else await self._step_images(name, params)
+        await self._publish(tool_result(identity, failed, _result_summary(summary), images))
+
+    async def _step_images(self, name: str, params: Mapping[str, Any]) -> list[Image]:
+        """An image file the agent opened is shown to the player, except the player's own attachments."""
+        if _ANTIGRAVITY_TOOLS.get(name) != "Read" or self._home is None:
+            return []
+        path = _antigravity_value(params, *_ANTIGRAVITY_PATH_KEYS)
+        source = Path(path) if isinstance(path, str) else None
+        if (source is None or not source.is_absolute() or source.suffix.lower() not in _ANTIGRAVITY_IMAGE_SUFFIXES
+                or source.parent == antigravity.attachments_dir(self._home)):
+            return []
+        image = await asyncio.to_thread(session_images.save_file, self._workspace, source)
+        return [image] if image is not None else []
+
+    async def _on_subagent(self, index: int, state: Any, step: dict[str, Any]) -> None:
+        """`invoke_subagent` starts agents that run on their own (their steps never reach this stream):
+        each becomes a detached delegation whose activity is read from its brain transcript."""
+        info = _antigravity_mapping(step.get("subagent_info"))
+        for agent in info.get("subagents") or []:
+            if not isinstance(agent, dict) or not isinstance(agent.get("conversation_id"), str):
+                continue
+            agent_id = agent["conversation_id"]
+            delegation = self._delegations.get(agent_id)
+            if delegation is None:
+                try:
+                    reader = antigravity.TranscriptReader(antigravity.transcript(self._home or Path("."), agent_id))
+                except antigravity.AntigravityError:
+                    continue
+                delegation = _AntigravityDelegation(f"agy-{uuid4().hex}", reader, [], time.monotonic())
+                self._delegations[agent_id] = delegation
+                prompt = str(agent.get("initial_prompt") or "")
+                role = str(agent.get("role") or "")
+                input_data = {key: value for key, value in (
+                    ("prompt", prompt), ("description", role), ("subagent_type", agent.get("type_name")),
+                    ("run_in_background", True)) if value}
+                title = role or (prompt.strip().splitlines() or ["Delegated task"])[0]
+                await self._publish(tool_use(delegation.tool_use_id, "Agent", title[:_TITLE_LIMIT], input_data))
+                await self._publish(subagent_updated(delegation.tool_use_id, agentId=agent_id, status="started",
+                                                     detached=True))
+            if state == "ERROR" and not delegation.done:
+                delegation.done = True
+                await self._publish(tool_result(delegation.tool_use_id, True, "Antigravity could not start the agent."))
+        if state != "ERROR":
+            self._start_watch()
+
+    async def _on_result(self, stream: antigravity.Stream, result: dict[str, Any]) -> None:
+        """Only `terminalReason` is required by the contract; every other field is best effort."""
+        totals = _antigravity_mapping(result.get("usage"))
+        usage = _antigravity_usage(self._totals, totals) if totals else None
+        if totals:
+            self._totals = totals
+        if stream.conversation_id:
+            self._conversation_id = stream.conversation_id
+        self._conversation_saved = True
+        if not self._turn_active:
+            return
+        interrupted = (self._interrupted or result.get("finished_reason") == "interrupted"
+                       or result.get("error") == "interrupted")
+        failed = result.get("status") != "SUCCESS"
+        await self._poll_transcripts()
+        if failed and not interrupted:
+            await self._publish(agent_error(_antigravity_message(str(result.get("error") or ""))))
+        await self._finish_turn("interrupted" if interrupted else "error" if failed else "completed",
+                                subtype=None if not failed or interrupted else str(result.get("status") or "") or None,
+                                usage=usage)
+
+    async def _finish_turn(self, terminal: str, *, subtype: str | None = None,
+                           usage: dict[str, Any] | None = None) -> None:
+        await self._close_open_steps()
+        await self._deny_pending("The turn ended")
+        if self._bridge is not None:
+            self._bridge.deny_pending("The turn ended")
+        self._hook_args.clear()
+        self._turn_active = False
+        await self._publish(turn_result(terminal, subtype=subtype,
+                                        duration_ms=int((time.monotonic() - self._turn_started) * 1000), usage=usage))
+        self._spawn(self._after_turn())
+
+    async def _after_turn(self) -> None:
+        await self._sync_credential()
+        await self._refresh_quota()
+
+    async def _close_open_steps(self) -> None:
+        """What the turn left open ends: streamed text becomes its message, a step that never finished
+        (interrupted mid-call) fails, so nothing spins forever."""
+        for message_id, parts in list(self._messages.values()):
+            await self._publish(assistant_message(message_id, "".join(parts)))
+        self._messages.clear()
+        for identity, name, params in list(self._deferred_tools.values()):
+            shared, input_data = _antigravity_tool(name, params)
+            await self._publish(tool_use(identity, shared, _tool_title(shared, input_data), input_data))
+            await self._publish(tool_result(identity, True, "The step did not finish"))
+        self._deferred_tools.clear()
+        for identity in list(self._open_tools.values()):
+            await self._publish(tool_result(identity, True, "The step did not finish"))
+        self._open_tools.clear()
+
+    # --- brain transcripts: thinking and delegated agents ---
+
+    def _start_watch(self) -> None:
+        if self._watch is None or self._watch.done():
+            self._watch = asyncio.create_task(self._watch_transcripts())
+
+    async def _watch_transcripts(self) -> None:
+        """Reads the transcripts while a turn runs or a delegated agent still works."""
+        while not self._closing:
+            idle = time.monotonic() - _ANTIGRAVITY_DELEGATION_IDLE_SECONDS
+            working = [item for item in self._delegations.values() if not item.done and item.seen_at > idle]
+            if not self._turn_active and not working:
+                return
+            await asyncio.sleep(_ANTIGRAVITY_POLL_SECONDS if self._turn_active else _ANTIGRAVITY_IDLE_POLL_SECONDS)
+            try:
+                await self._poll_transcripts()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOG.warning("The Antigravity transcripts could not be read", exc_info=True)
+
+    async def _poll_transcripts(self, *, publish: bool = True) -> None:
+        """Thinking of the main agent's completed steps (agy streams none), and each delegated agent's
+        messages, thinking and steps, nested under its delegation."""
+        async with self._transcript_lock:
+            reader = self._thinking
+            if reader is not None:
+                for record in await asyncio.to_thread(reader.read):
+                    thinking = record.get("thinking")
+                    if publish and record.get("type") == "PLANNER_RESPONSE" and isinstance(thinking, str) and thinking:
+                        await self._publish(thinking_message(f"agy-{uuid4().hex}", thinking))
+            for agent_id, delegation in list(self._delegations.items()):
+                if delegation.done:
+                    continue
+                records = await asyncio.to_thread(delegation.reader.read)
+                if records:
+                    delegation.seen_at = time.monotonic()
+                for record in records:
+                    await self._on_delegated(agent_id, delegation, record)
+
+    async def _on_delegated(self, agent_id: str, delegation: _AntigravityDelegation, record: dict[str, Any]) -> None:
+        parent = delegation.tool_use_id
+        kind = record.get("type")
+        if kind == "PLANNER_RESPONSE":
+            thinking, content = record.get("thinking"), record.get("content")
+            if isinstance(thinking, str) and thinking:
+                await self._publish(_with_parent(thinking_message(f"agy-{uuid4().hex}", thinking), parent))
+            if isinstance(content, str) and content:
+                await self._publish(_with_parent(assistant_message(f"agy-{uuid4().hex}", content), parent))
+            calls = [call for call in record.get("tool_calls") or [] if isinstance(call, dict)]
+            last = None
+            for call in calls:
+                identity = f"agy-{uuid4().hex}"
+                args = _antigravity_mapping(call.get("args"))
+                shared, input_data = _antigravity_tool(str(call.get("name") or ""), args)
+                last = shared
+                delegation.tools.append(identity)
+                await self._publish(_with_parent(tool_use(identity, shared, _tool_title(shared, input_data), input_data),
+                                                 parent))
+            if calls:
+                await self._publish(subagent_updated(parent, agentId=agent_id, status="working", lastToolName=last))
+            elif isinstance(content, str) and content:
+                # A response that calls no tool ends the agent's loop: this is its report.
+                delegation.done = True
+                await self._publish(subagent_updated(parent, agentId=agent_id, status="completed",
+                                                     summary=_result_summary(content)))
+                await self._publish(tool_result(parent, False, _result_summary(content)))
+        elif kind == "GENERIC" and delegation.tools:
+            content = record.get("content")
+            await self._publish(_with_parent(tool_result(
+                delegation.tools.pop(0), record.get("status") == "ERROR",
+                _result_summary(content if isinstance(content, str) and content else "Done")), parent))
+
+    # --- usage ---
+
+    async def _emit_context(self, used: int | None) -> None:
+        window = antigravity.context_window(self._config.model)
+        await self._emit("session.usage", {"context": {
+            "percent": used / window * 100 if used is not None and window else None,
+            "usedTokens": used, "limitTokens": window, "updatedAt": time.time()}})
+
+    async def _refresh_quota(self, *, refresh: bool = False) -> None:
+        """The account's 5-hour and weekly limits of the selected model's quota family (`/usage`)."""
+        home = self._home
+        if home is None or self._closing:
+            return
+        try:
+            quota = await antigravity.usage(self._binary(), home, key=self._credential.connection_id,
+                                            model=self._config.model, env=antigravity.environment(home, self._environment),
+                                            refresh=refresh)
+        except antigravity.AntigravityError:
+            LOG.debug("Antigravity account usage is unavailable")
+            return
+        readings = {name: {key: value for key, value in window.items() if key != "updatedAt"}
+                    for name, window in quota.items() if isinstance(window, dict)}
+        if quota and readings != self._last_quota:
+            self._last_quota = readings
+            await self._emit("session.usage", {"quota": quota})
+
+    # --- bookkeeping ---
+
+    def _spawn(self, coroutine: Coroutine[Any, Any, Any]) -> None:
+        if self._closing:
+            coroutine.close()
+            return
+        task = asyncio.create_task(coroutine)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    def _frames_path(self) -> Path:
+        if self._home is None:
+            raise RuntimeError("The Antigravity runtime home was not prepared")
+        return self._home / antigravity.MOOI_DIR / _ANTIGRAVITY_FRAMES
+
+    def _open_frames(self) -> None:
+        if self._frames is not None:
+            return
+        path = self._frames_path()
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        self._frames = os.fdopen(descriptor, "a", encoding="utf-8")
+        self._frames_bytes = path.stat().st_size
+
+    def _record(self, frame: Mapping[str, Any]) -> None:
+        """Appends one line to the frame record; never fails the conversation."""
+        handle = self._frames
+        if handle is None or self._frames_bytes > _ANTIGRAVITY_FRAMES_LIMIT:
+            return
+        try:
+            line = json.dumps({**frame, "mooiAt": time.time()}, ensure_ascii=False, default=str) + "\n"
+            handle.write(line)
+            handle.flush()
+            self._frames_bytes += len(line)
+        except (OSError, ValueError):
+            LOG.debug("The Antigravity frame record could not be written", exc_info=True)
+
+    def _close_frames(self) -> None:
+        handle, self._frames = self._frames, None
+        if handle is not None:
+            with suppress(OSError):
+                handle.close()
 
     async def _cleanup_home(self) -> None:
         if self._home is None:
@@ -2959,457 +3756,18 @@ class _GeminiRuntime:
         self._home = None
 
 
-class _GeminiStream:
-    """Turns Gemini's streamed text and thoughts into assistant and thinking messages: consecutive chunks
-    of one kind are one message, closed (with its full text) as soon as anything else happens."""
-
-    def __init__(self, publish: Callable[[AgentEvent], Awaitable[None]]) -> None:
-        self._publish = publish
-        self._kind: str | None = None
-        self._id = ""
-        self._parts: list[str] = []
-
-    async def chunk(self, kind: str, text: str) -> None:
-        if not text:
-            return
-        if kind != self._kind:
-            await self.close()
-            self._kind, self._id = kind, uuid4().hex
-        if kind == "thinking" and self._parts:
-            text = "\n\n" + text
-        self._parts.append(text)
-        await self._publish(assistant_delta(self._id, text) if kind == "assistant" else thinking_delta(self._id, text))
-
-    async def close(self) -> None:
-        if self._kind and self._parts:
-            text = "".join(self._parts)
-            await self._publish(assistant_message(self._id, text) if self._kind == "assistant"
-                                else thinking_message(self._id, text))
-        self._kind, self._parts = None, []
-
-
-class GeminiAcpAgentRuntime(_GeminiRuntime):
-    """Gemini through the Agent Client Protocol (`gemini --acp`), the CLI's programmatic interface.
-
-    One process per session keeps one ACP session across turns, so a message starts its turn at once.
-    It runs in YOLO mode (full access, like the other providers: Gemini asks for no approvals) with the
-    shared browser. A broken process costs only its running turn: `recover()` relaunches it and loads
-    the conversation the CLI saved (`session/load`), whose replayed history never reaches the transcript.
-    """
-
-    capabilities: ClassVar[AgentCapabilities] = GEMINI_CAPABILITIES
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self._acp: Any = None
-        self._session_id: str | None = None
-        self._loading = False
-        self._stream = _GeminiStream(self._publish)
-        # ACP tool call id -> (name, title, input) of a call whose `tool.use` waits for its diff.
-        self._deferred: dict[str, tuple[str, str, dict[str, Any]]] = {}
-        self._open_steps: set[str] = set()
-        self._recovery_lock = asyncio.Lock()
-        self._context_limit: int | None = None
-
-    async def start(self) -> None:
-        started_at = time.perf_counter()
-        await self._prepare()
-        await self._connect()
-        await self._emit_context(0)
-        try:
-            await self._refresh_quota()
-        except Exception:
-            LOG.debug("Initial Gemini account usage is unavailable")
-        LOG.info("Gemini ACP runtime connected in %.0f ms", (time.perf_counter() - started_at) * 1000)
-
-    async def _connect(self) -> None:
-        """Launches the CLI and opens (or reloads) the conversation on the selected model."""
-        from mic_sessions.shared import gemini
-        acp = gemini.Acp([self._binary(), "--acp", "--approval-mode", "yolo"], cwd=self._workspace,
-                         env=self._process_env(), updates=self._on_update, requests=self._on_request)
-        try:
-            await acp.start()
-            params = {"cwd": str(self._workspace), "mcpServers": []}
-            if self._session_id is None:
-                session = await acp.request("session/new", params)
-                self._session_id = str(session["sessionId"])
-                self._session_ids.append(self._session_id)
-            else:
-                self._loading = True
-                try:
-                    session = await acp.request("session/load", {**params, "sessionId": self._session_id}, timeout=120)
-                finally:
-                    self._loading = False
-            current = ((session or {}).get("models") or {}).get("currentModelId")
-            if current != self._config.model:
-                await acp.request("session/set_model", {"sessionId": self._session_id, "modelId": self._config.model})
-        except BaseException:
-            await acp.close()
-            raise
-        previous, self._acp = self._acp, acp
-        if previous is not None:
-            await previous.close()
-
-    def _require_acp(self) -> Any:
-        if self._closing or self._acp is None:
-            raise ApiException.conflict("Gemini session is closed")
-        return self._acp
-
-    async def send(self, text: str, images: Sequence[Image] = ()) -> None:
-        acp = self._require_acp()
-        if self._task and not self._task.done():
-            raise ApiException.conflict("A Gemini turn is already running")
-        self._interrupted = False
-        prompt = await asyncio.to_thread(lambda: [
-            {"type": "image", "mimeType": image.media_type, "data": image.base64()} for image in images])
-        if text:
-            prompt.append({"type": "text", "text": text})
-        self._task = asyncio.create_task(self._run(acp, prompt))
-        await asyncio.sleep(0)
-
-    async def _run(self, acp: Any, prompt: list[dict[str, Any]]) -> None:
-        from mic_sessions.shared import gemini
-        terminal, subtype, usage = "error", None, None
-        # A broken process is reported by its recovery, which ends the turn itself.
-        recovering = False
-        started = time.monotonic()
-        try:
-            result = await acp.request("session/prompt", {"sessionId": self._session_id, "prompt": prompt}, timeout=None)
-            reason = (result or {}).get("stopReason")
-            terminal = "interrupted" if reason == "cancelled" or self._interrupted else "completed"
-            subtype = reason if reason not in ("end_turn", "cancelled") else None
-            tokens = (result or {}).get("usage") or {}
-            usage = {"input_tokens": tokens.get("inputTokens"), "output_tokens": tokens.get("outputTokens"),
-                     "cache_read_input_tokens": tokens.get("cachedReadTokens")} if tokens else None
-        except asyncio.CancelledError:
-            terminal = "interrupted"
-            raise
-        except gemini.GeminiError as error:
-            if self._interrupted:
-                terminal = "interrupted"
-            elif not acp.alive and not self._closing:
-                recovering = True
-            else:
-                await self._publish(agent_error(_gemini_failure(error)))
-        except Exception:
-            LOG.exception("The Gemini turn failed")
-            await self._publish(agent_error("Gemini could not complete the turn. Check your account and try again."))
-        finally:
-            await self._stream.close()
-            await self._close_open_steps()
-            if not self._closing and not recovering:
-                await self._publish(turn_result(terminal, subtype=subtype,
-                                               duration_ms=int((time.monotonic() - started) * 1000), usage=usage))
-        if recovering:
-            await self._recover_stream(acp.failure or RuntimeError("the agent process exited"))
-            return
-        try:
-            await self._refresh_quota()
-        except Exception:
-            LOG.debug("Gemini quota is unavailable")
-
-    async def _close_open_steps(self) -> None:
-        """A step the turn left open (interrupted mid-call) ends as failed, so nothing spins forever."""
-        for identity, (name, title, input_data) in list(self._deferred.items()):
-            await self._publish(tool_use(identity, name, title, input_data))
-            self._open_steps.add(identity)
-        self._deferred.clear()
-        for identity in list(self._open_steps):
-            await self._publish(tool_result(identity, True, "The step did not finish"))
-        self._open_steps.clear()
-
-    async def _on_update(self, params: dict[str, Any]) -> None:
-        if self._loading or params.get("sessionId") != self._session_id:
-            return
-        update = params.get("update") or {}
-        kind = update.get("sessionUpdate")
-        content = update.get("content") if isinstance(update.get("content"), dict) else {}
-        if kind == "agent_message_chunk":
-            await self._stream.chunk("assistant", str(content.get("text") or ""))
-        elif kind == "agent_thought_chunk":
-            await self._stream.chunk("thinking", str(content.get("text") or ""))
-        elif kind == "tool_call":
-            await self._stream.close()
-            await self._on_tool_call(update)
-        elif kind == "tool_call_update":
-            await self._on_tool_update(update)
-        elif kind == "usage_update":
-            used, size = update.get("used"), update.get("size")
-            if isinstance(size, int) and size > 0:
-                self._context_limit = size
-            if isinstance(used, int):
-                await self._emit_context(used, self._context_limit)
-
-    async def _on_tool_call(self, update: dict[str, Any]) -> None:
-        identity = str(update.get("toolCallId") or uuid4().hex)
-        name, title, input_data = _gemini_acp_tool(update)
-        if update.get("kind") in ("edit", "delete", "move") and "old_string" not in input_data:
-            # The diff arrives with the result: the step is shown once it can render as a file edit.
-            self._deferred[identity] = (name, title, input_data)
-            return
-        if identity not in self._open_steps:
-            self._open_steps.add(identity)
-            await self._publish(tool_use(identity, name, title, input_data))
-
-    async def _on_tool_update(self, update: dict[str, Any]) -> None:
-        identity = str(update.get("toolCallId") or "")
-        status = update.get("status")
-        if status not in ("completed", "failed"):
-            return
-        deferred = self._deferred.pop(identity, None)
-        if deferred is not None:
-            name, title, input_data = deferred
-            refined = _gemini_acp_tool({**update, "kind": update.get("kind") or "edit",
-                                        "locations": update.get("locations") or [{"path": input_data.get("file_path")}]})
-            if "old_string" in refined[2]:
-                name, title, input_data = refined
-            await self._publish(tool_use(identity, name, title, input_data))
-        elif identity not in self._open_steps:
-            name, title, input_data = _gemini_acp_tool(update)
-            await self._publish(tool_use(identity, name, title, input_data))
-        self._open_steps.discard(identity)
-        await self._publish(tool_result(identity, status == "failed", _gemini_content_summary(update.get("content"))))
-
-    async def _on_request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        """Full access, like the other providers: a tool that still asks (an MCP server's own policy) is
-        allowed once; anything else the CLI asks of the client is refused."""
-        if method != "session/request_permission":
-            raise RuntimeError(f"Unsupported Gemini request {method}")
-        options = params.get("options") or []
-        if self._interrupted or self._closing:
-            return {"outcome": {"outcome": "cancelled"}}
-        chosen = next((option for option in options if option.get("kind") == "allow_once"), None) or next(
-            (option for option in options if str(option.get("kind", "")).startswith("allow")), None)
-        if chosen is None:
-            return {"outcome": {"outcome": "cancelled"}}
-        return {"outcome": {"outcome": "selected", "optionId": chosen["optionId"]}}
-
-    async def resolve(self, request_id: str, payload: dict[str, Any]) -> None:
-        raise ApiException.not_found("Unknown or already answered request")
-
-    async def set_configuration(self, config: AgentConfig) -> AgentConfig:
-        if config.model != self._config.model and self._acp is not None and self._session_id is not None:
-            await self._acp.request("session/set_model", {"sessionId": self._session_id, "modelId": config.model})
-        self._config = config
-        return config
-
-    async def interrupt(self) -> None:
-        self._interrupted = True
-        if self._acp is not None and self._session_id is not None and self._task and not self._task.done():
-            try:
-                await self._acp.notify("session/cancel", {"sessionId": self._session_id})
-            except Exception:
-                self._task.cancel()
-
-    async def recover(self) -> None:
-        """Relaunches the CLI and reloads the saved conversation. Serialized: a failed turn and a failed
-        delivery may both try at once."""
-        if self._closing:
-            raise ApiException.conflict("Gemini session is closed")
-        async with self._recovery_lock:
-            await self._prepare()
-            await self._connect()
-            self._interrupted = False
-
-    async def _recover_stream(self, error: Exception) -> None:
-        """A broken process loses only its running turn: relaunch with backoff, reloading the
-        conversation, and fail the session only when every attempt does."""
-        from mic_sessions.shared import gemini
-        LOG.error("The Gemini ACP process failed", exc_info=error)
-        cause = error.cause if isinstance(error, gemini.GeminiError) else "the agent stream broke"
-        await self._publish(agent_error(
-            f"{_INTERRUPTED_MESSAGE} ({cause}). Restoring the conversation; the workspace and its changes are kept."))
-        await self._close_open_steps()
-        attempts = get_settings().agent_recovery_attempts
-        for attempt in range(attempts):
-            if attempt:
-                await asyncio.sleep(2 ** attempt)
-            try:
-                await self.recover()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                LOG.warning("Gemini relaunch attempt %s/%s failed", attempt + 1, attempts, exc_info=True)
-                continue
-            await self._emit("agent.activity", {
-                "kind": "stream_recovered",
-                "description": "Reconnected and restored the conversation. Send a message to continue.",
-            })
-            await self._publish(turn_result("error", subtype="stream_interrupted"))
-            return
-        await self._publish(session_status(STATUS_FAILED, RECOVERABLE_DETAIL))
-
-    async def close(self) -> None:
-        self._closing = True
-        if self._task and not self._task.done():
-            self._task.cancel()
-            await asyncio.gather(self._task, return_exceptions=True)
-        if self._acp is not None:
-            await self._acp.close()
-            self._acp = None
-        await self._cleanup_home()
-
-
-class GeminiCliAgentRuntime(_GeminiRuntime):
-    """Gemini through its headless CLI (`gemini --prompt … --output-format stream-json`), without ACP.
-
-    Each turn is one process that prints its events and exits; the conversation continues across turns
-    with `--resume`, from the session log the CLI saved in the private home. Its stream carries no
-    thoughts and takes no images, so it declares neither. Nothing outlives a turn, so recovery only
-    re-validates the checkout: the next turn starts a fresh process on the saved conversation.
-    """
-
-    capabilities: ClassVar[AgentCapabilities] = GEMINI_CLI_CAPABILITIES
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self._run_process: Any = None
-        self._session_id = str(uuid4())
-        # A conversation is resumable only once a turn saved model output; until then each turn starts anew.
-        self._resumable = False
-        self._open_steps: set[str] = set()
-
-    async def start(self) -> None:
-        await self._prepare()
-        await self._emit_context(0)
-        try:
-            await self._refresh_quota()
-        except Exception:
-            LOG.debug("Initial Gemini account usage is unavailable")
-
-    def _arguments(self) -> list[str]:
-        arguments = [self._binary(), "--prompt", "", "--output-format", "stream-json", "--approval-mode", "yolo",
-                     "--model", self._config.model]
-        if self._resumable:
-            return [*arguments, "--resume", self._session_id]
-        if self._session_id in self._session_ids:
-            # The previous attempt left an unresumable log under this id: start over under a new one.
-            self._session_id = str(uuid4())
-        self._session_ids.append(self._session_id)
-        return [*arguments, "--session-id", self._session_id]
-
-    async def send(self, text: str, images: Sequence[Image] = ()) -> None:
-        if self._closing or self._home is None:
-            raise ApiException.conflict("Gemini session is closed")
-        if self._task and not self._task.done():
-            raise ApiException.conflict("A Gemini turn is already running")
-        self._interrupted = False
-        await asyncio.to_thread(_validate_agent_workspace, self._workspace, self._branch)
-        self._task = asyncio.create_task(self._run(text))
-        await asyncio.sleep(0)
-
-    async def _run(self, text: str) -> None:
-        from mic_sessions.shared import gemini
-        stream = _GeminiStream(self._publish)
-        terminal, usage, produced = "error", None, False
-        started = time.monotonic()
-        run = None
-        try:
-            run = gemini.Headless(self._arguments(), cwd=self._workspace, env=self._process_env())
-            self._run_process = run
-            async for event in run.events(text):
-                kind = event.get("type")
-                if kind == "message" and event.get("role") == "assistant":
-                    produced = True
-                    await stream.chunk("assistant", str(event.get("content") or ""))
-                elif kind == "tool_use":
-                    produced = True
-                    await stream.close()
-                    identity = str(event.get("tool_id") or uuid4().hex)
-                    args = event.get("parameters") if isinstance(event.get("parameters"), dict) else {}
-                    name, input_data = _gemini_tool(str(event.get("tool_name") or ""), args)
-                    self._open_steps.add(identity)
-                    await self._publish(tool_use(identity, name, _tool_title(name, input_data), input_data))
-                elif kind == "tool_result":
-                    identity = str(event.get("tool_id") or "")
-                    failed = event.get("status") == "error"
-                    error = event.get("error") if isinstance(event.get("error"), dict) else {}
-                    self._open_steps.discard(identity)
-                    await self._publish(tool_result(identity, failed, _result_summary(
-                        event.get("output") or error.get("message") or ("Failed" if failed else "Done"))))
-                elif kind == "error" and event.get("severity") == "error":
-                    await self._publish(agent_error(_result_summary(str(event.get("message") or "Gemini reported an error"))))
-                elif kind == "result":
-                    await stream.close()
-                    stats = event.get("stats") if isinstance(event.get("stats"), dict) else {}
-                    usage = {"input_tokens": stats.get("input_tokens"), "output_tokens": stats.get("output_tokens"),
-                             "cache_read_input_tokens": stats.get("cached")} if stats else None
-                    if event.get("status") == "success":
-                        terminal = "completed"
-                    elif not self._interrupted:
-                        error = event.get("error") if isinstance(event.get("error"), dict) else {}
-                        await self._publish(agent_error(_gemini_api_message(str(error.get("message") or ""))))
-        except asyncio.CancelledError:
-            terminal = "interrupted"
-            if run is not None:
-                await run.close()
-            raise
-        except gemini.GeminiError as error:
-            if not self._interrupted:
-                await self._publish(agent_error(_gemini_failure(error)))
-        except Exception:
-            LOG.exception("The Gemini CLI turn failed")
-            await self._publish(agent_error("Gemini could not complete the turn. Check your account and try again."))
-        finally:
-            self._run_process = None
-            await stream.close()
-            for identity in list(self._open_steps):
-                await self._publish(tool_result(identity, True, "The step did not finish"))
-            self._open_steps.clear()
-            self._resumable = self._resumable or produced
-            if not self._closing:
-                await self._publish(turn_result("interrupted" if self._interrupted else terminal,
-                                               duration_ms=int((time.monotonic() - started) * 1000), usage=usage))
-        await self._context_from_log(self._session_id)
-        try:
-            await self._refresh_quota()
-        except Exception:
-            LOG.debug("Gemini quota is unavailable")
-
-    async def resolve(self, request_id: str, payload: dict[str, Any]) -> None:
-        raise ApiException.not_found("Unknown or already answered request")
-
-    async def interrupt(self) -> None:
-        self._interrupted = True
-        run = self._run_process
-        if run is not None:
-            await run.interrupt()
-        elif self._task and not self._task.done():
-            self._task.cancel()
-
-    async def recover(self) -> None:
-        if self._closing:
-            raise ApiException.conflict("Gemini session is closed")
-        await self._prepare()
-        self._interrupted = False
-
-    async def close(self) -> None:
-        self._closing = True
-        if self._run_process is not None:
-            await self._run_process.close()
-        if self._task and not self._task.done():
-            self._task.cancel()
-            await asyncio.gather(self._task, return_exceptions=True)
-        await self._cleanup_home()
-
-
-def _gemini_api_message(message: str) -> str:
-    """A user-facing reason for a failed Gemini request: the API's own wording is buried in JSON."""
-    lowered = message.lower()
-    if "api key not valid" in lowered or "api_key_invalid" in lowered:
-        return "Gemini rejected the API key. Check it in your agent accounts."
-    if "429" in message or "resource_exhausted" in lowered or "quota" in lowered:
-        return "Gemini reports that this account reached its usage limit. Try again later or switch model."
-    if "401" in message or "403" in message or "unauthenticated" in lowered or "permission_denied" in lowered:
-        return "Gemini rejected the account. Reconnect it in your agent accounts."
-    return "Gemini could not complete the turn. Retry, or check your account and selected model."
-
-
-def _gemini_failure(error: Exception) -> str:
-    from mic_sessions.shared import gemini
-    if isinstance(error, gemini.GeminiError) and error.code is not None:
-        return _gemini_api_message(error.detail)
-    return "Gemini could not complete the turn. Check your account connection and try again."
+async def _antigravity_write_back(home: Path, credential: Credential) -> None:
+    """D5 for a throwaway home: a sign-in agy renewed there is saved before the home is removed."""
+    try:
+        bundle = await asyncio.to_thread(antigravity.read_credential, home)
+    except antigravity.AntigravityError:
+        return
+    if bundle is None or bundle == credential.token or credential.save is None:
+        return
+    try:
+        await credential.save(bundle)
+    except Exception:
+        LOG.warning("The renewed Antigravity sign-in could not be saved", exc_info=True)
 
 
 @dataclass(frozen=True)
@@ -3489,11 +3847,9 @@ PROVIDERS: dict[str, ProviderDescriptor] = {
         AdapterDescriptor("sdk", "Claude SDK", ClaudeAgentRuntime),
         AdapterDescriptor("cli", "Claude CLI", ClaudeCliAgentRuntime),
     )),
-    # Google ships no agent SDK: both adapters drive the pinned Gemini CLI, through ACP (its programmatic
-    # interface, the default) or headless stream-json.
-    "gemini": ProviderDescriptor("gemini", "Gemini", (
-        AdapterDescriptor("acp", "Gemini ACP", GeminiAcpAgentRuntime),
-        AdapterDescriptor("cli", "Gemini CLI", GeminiCliAgentRuntime),
+    # Google ships no agent SDK: the one adapter drives the pinned Antigravity CLI (`agy`) natively.
+    "antigravity": ProviderDescriptor("antigravity", "Antigravity", (
+        AdapterDescriptor("cli", "Antigravity CLI", AntigravityCliAgentRuntime),
     )),
 }
 

@@ -1,7 +1,8 @@
 import { useState } from 'react';
-import { Check, KeyRound, LogIn } from 'lucide-react';
+import { Check, KeyRound } from 'lucide-react';
 import { AuthorizationCodePairing } from '@/features/agents/components/AuthorizationCodePairing';
 import { CodexPairing } from '@/features/agents/components/CodexPairing';
+import { AntigravityPairing } from '@/features/agents/components/AntigravityPairing';
 import { agentProviderCopy } from '@/features/agents/lib/agentProviderCopy';
 import type { AgentProvider } from '@/features/agents/types/AgentProvider';
 import { Button } from '@/shared/components/Button';
@@ -17,20 +18,12 @@ interface AddAgentAccountDialogProps {
   onConnectToken: (provider: string, token: string, name: string) => Promise<boolean>;
 }
 
-type Method = 'sign-in' | 'paste';
-
 /**
- * How a provider may be linked, as the API reports it. A pasted setup token is only the fallback for a
- * provider whose sign-in is off (it is deprecated); an API key is a way in of its own, offered next to
- * the sign-in.
+ * Whether a provider links by pasting a credential. A setup token is only the fallback for a provider
+ * whose sign-in is off (it is deprecated); the other providers sign in through their own flow.
  */
-const methodsOf = (provider: AgentProvider | undefined): Method[] => {
-  if (!provider) return [];
-  const signIn = provider.modes.includes('oauth') && provider.oauthEnabled;
-  if (provider.modes.includes('api_key')) return signIn ? ['sign-in', 'paste'] : ['paste'];
-  if (signIn) return ['sign-in'];
-  return provider.modes.includes('setup_token') ? ['paste'] : [];
-};
+const pastes = (provider: AgentProvider | undefined) =>
+  !!provider && !provider.oauthEnabled && provider.modes.includes('setup_token');
 
 const optionClass = (selected: boolean) => cn(
   'flex items-center justify-between rounded-xl border px-4 py-3 text-left text-sm font-semibold transition focus-visible:outline-2 focus-visible:outline-brand disabled:opacity-60',
@@ -41,16 +34,14 @@ export const AddAgentAccountDialog = ({ providers, busy, actionError, onClose, o
   onConnectToken }: AddAgentAccountDialogProps) => {
   const [title, setTitle] = useState('');
   const [providerId, setProviderId] = useState('');
-  const [choice, setChoice] = useState<Method | null>(null);
   const [token, setToken] = useState('');
   const [pairing, setPairing] = useState(false);
   const provider = providers.find((entry) => entry.id === providerId);
   const copy = provider ? agentProviderCopy(provider.id, provider.label) : null;
   const validTitle = title.trim().length > 0;
   const isCodex = provider?.modes.includes('device_oauth');
-  const methods = methodsOf(provider);
-  const method = choice && methods.includes(choice) ? choice : methods[0];
-  const signsIn = isCodex || method === 'sign-in';
+  const isAntigravity = provider?.modes.includes('agent_oauth');
+  const signsIn = !!provider && !pastes(provider);
 
   const connect = () => {
     if (!provider || !validTitle) return;
@@ -76,33 +67,19 @@ export const AddAgentAccountDialog = ({ providers, busy, actionError, onClose, o
       <label className="flex flex-col gap-2">
         <span className="text-xs font-semibold text-ink-muted">Account title <span className="text-danger">*</span></span>
         <input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={100}
-          disabled={pairing} required autoFocus placeholder="e.g. Claude Ana or Gemini Joserra"
+          disabled={pairing} required autoFocus placeholder="e.g. Claude Ana or Antigravity Joserra"
           className="h-12 rounded-control border border-line bg-surface-2 px-3 text-sm text-ink outline-none transition focus:border-brand disabled:opacity-60" />
       </label>
       <div>
         <span className="text-xs font-semibold text-ink-muted">Provider <span className="text-danger">*</span></span>
         <div className="mt-2 grid gap-2 sm:grid-cols-3">
           {providers.map((entry) => <button key={entry.id} type="button" disabled={pairing}
-            onClick={() => { setProviderId(entry.id); setChoice(null); setToken(''); }}
+            onClick={() => { setProviderId(entry.id); setToken(''); }}
             aria-pressed={entry.id === providerId} className={optionClass(entry.id === providerId)}>
             {entry.label}{entry.id === providerId && <Check className="size-4 text-brand" />}
           </button>)}
         </div>
       </div>
-      {provider && copy && methods.length > 1 && <div>
-        <span className="text-xs font-semibold text-ink-muted">Connect with</span>
-        <div className="mt-2 grid gap-2 sm:grid-cols-2">
-          {methods.map((entry) => <button key={entry} type="button" disabled={pairing}
-            onClick={() => { setChoice(entry); setToken(''); }}
-            aria-pressed={entry === method} className={optionClass(entry === method)}>
-            <span className="flex items-center gap-2">
-              {entry === 'sign-in' ? <LogIn className="size-4" /> : <KeyRound className="size-4" />}
-              {entry === 'sign-in' ? `${provider.label} sign-in` : copy.pasted.label}
-            </span>
-            {entry === method && <Check className="size-4 text-brand" />}
-          </button>)}
-        </div>
-      </div>}
       {provider && copy && !signsIn && <label className="flex flex-col gap-2">
         <span className="text-xs font-semibold text-ink-muted">{copy.pasted.label}</span>
         <span className="flex h-12 items-center gap-2 rounded-control border border-line bg-surface-2 px-3 focus-within:border-brand">
@@ -116,7 +93,9 @@ export const AddAgentAccountDialog = ({ providers, busy, actionError, onClose, o
         </span>
       </label>}
       {pairing && isCodex && <CodexPairing name={title.trim()} onConnected={() => { onConnected(); onClose(); }} />}
-      {pairing && provider && copy && !isCodex && <AuthorizationCodePairing provider={provider.id} name={title.trim()}
+      {pairing && provider && copy && isAntigravity && <AntigravityPairing name={title.trim()}
+        copy={copy.signIn} onConnected={() => { onConnected(); onClose(); }} />}
+      {pairing && provider && copy && !isCodex && !isAntigravity && <AuthorizationCodePairing provider={provider.id} name={title.trim()}
         copy={copy.signIn} onConnected={() => { onConnected(); onClose(); }} />}
       {actionError && <p role="alert" className="rounded-control border border-danger/30 bg-danger-soft px-4 py-2.5 text-sm text-danger">{actionError}</p>}
     </div>

@@ -53,8 +53,6 @@ class Credential:
     session_effort: str | None = None
     # The platform's default adapter for this provider; None is the provider's first one.
     session_adapter: str | None = None
-    # Only for a provider that never rotates it (Google): its CLI renews the access token mid-turn.
-    refresh_token: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -418,8 +416,8 @@ async def fetch_agent_credential(caller: Caller, connection_id: str) -> Credenti
         session_model=body.get("sessionModel"),
         session_effort=body.get("sessionEffort"),
         session_adapter=body.get("sessionAdapter"),
-        refresh_token=body.get("refreshToken"),
-        save=save if body["provider"] == "codex" else None,
+        # CLI-owned sign-ins the session renews itself and writes back (Codex `auth.json`, the agy bundle).
+        save=save if body["provider"] in ("codex", "antigravity") else None,
         expires_at=datetime.fromisoformat(expires_at) if expires_at else None,
     )
 
@@ -430,3 +428,17 @@ async def link_codex(caller: Caller, token: str, account_label: str | None, name
         headers=_service_headers(caller), json={"token": token, "accountLabel": account_label, "name": name},
     )
     _raise_for_status(response, "Could not save the Codex connection")
+
+
+async def link_antigravity(caller: Caller, token: str, account_label: str | None, name: str) -> dict:
+    """Links agy's own Google sign-in (the opaque credential bundle) as an `agent_oauth` connection and
+    answers `mic-mooi`'s connection payload (no secret in it)."""
+    try:
+        response = await get_http_client().post(
+            f"{get_settings().mooi_api_base_url}/me/agents/antigravity/agent-connection",
+            headers=_service_headers(caller), json={"token": token, "accountLabel": account_label, "name": name},
+        )
+    except httpx.HTTPError:
+        raise ApiException.bad_gateway() from None
+    _raise_for_status(response, "Could not save the Antigravity connection")
+    return response.json()

@@ -104,11 +104,3 @@ app:
     claude:
       # Offers the Claude Code sign-in; false falls back to pasting a `claude setup-token` token.
       enabled: ${AGENT_CLAUDE_ENABLED:true}
-    gemini:
-      # Offers the Gemini CLI sign-in (Google); a Gemini API key is offered either way.
-      enabled: ${AGENT_GEMINI_ENABLED:true}
-      # The Gemini CLI's installed-app OAuth client; the sign-in is offered only once both are set.
-      client-id: ${AGENT_GEMINI_CLIENT_ID:}
-      client-secret: ${AGENT_GEMINI_CLIENT_SECRET:}
-      # Google access tokens live 1h; the session runtime renews in-turn, so a short margin is enough.
-      token-refresh-skew: ${AGENT_GEMINI_TOKEN_REFRESH_SKEW:10m}

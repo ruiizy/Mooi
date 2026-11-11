@@ -1,7 +1,7 @@
 # Production image of mic-sessions: the agent runtime host.
 #
 # Agents (Claude Code and Codex, both bundled by their pinned official SDKs, a standalone pinned
-# Claude Code CLI for the Claude CLI adapter and the pinned Gemini CLI for both Gemini adapters) run in full access
+# Claude Code CLI for the Claude CLI adapter and the pinned Antigravity CLI) run in full access
 # inside this container, so it carries the toolchains a session checkout usually needs: Git, Docker
 # CLI with Compose and Buildx (deployments drive the host engine through its mounted socket), Node,
 # Bun, Python with uv, Java 25 and the usual shell utilities (ssh, rsync, curl, jq, make, ripgrep).
@@ -66,12 +66,29 @@ RUN npm install -g --no-audit --no-fund "@anthropic-ai/claude-code@${CLAUDE_CODE
     && claude --version \
     && rm -rf /root/.npm
 
-# Gemini CLI driven by both Gemini adapters (AGENT_GEMINI_CLI): ACP (`--acp`) and headless stream-json.
-# Pinned: its ACP and session log formats are what the adapters and the Trace parser read; never auto-updated.
-ARG GEMINI_CLI_VERSION=0.68.0
-RUN npm install -g --no-audit --no-fund "@google/gemini-cli@${GEMINI_CLI_VERSION}" \
-    && gemini --version \
-    && rm -rf /root/.npm
+# Antigravity CLI (`agy`) driven by the Antigravity CLI adapter (AGENT_ANTIGRAVITY_CLI) through its headless
+# stream-json mode. Pinned per architecture (version, build id and SHA512 come from Google's updater manifest
+# https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_<amd64|arm64>.json; to
+# bump, set AGY_VERSION, AGY_BUILD and both SHA512s from those two manifests). Never the installer script
+# (it always installs the latest and edits shell profiles). Its self-updater is disabled: the stream format
+# the adapter and the Trace parser read must not change under a running image.
+ARG AGY_VERSION=1.5.5
+ARG AGY_BUILD=6740358537805824
+ARG AGY_SHA512_AMD64=746a2bd73f83b65d9b44f2fc55d0f0f511ff7f89702846213eeabd76d06bc9c98576b424c2babc7b947f15e518447b946ba02dca260b778363c55c07a7f7a277
+ARG AGY_SHA512_ARM64=eb3e025c125c1c60a1493a0c1d9cdf15e8372277d6d3b015e8d29e1bd095344eece5cbc2447f238148bd259d5f2daa0f75641adc0ac02b5fad57edc4ed842d59
+RUN case "$(dpkg --print-architecture)" in \
+        amd64) path=linux-x64/cli_linux_x64.tar.gz sha="${AGY_SHA512_AMD64}" ;; \
+        arm64) path=linux-arm/cli_linux_arm64.tar.gz sha="${AGY_SHA512_ARM64}" ;; \
+        *) echo "agy: unsupported architecture" >&2; exit 1 ;; \
+    esac \
+    && mkdir /tmp/agy \
+    && curl -fsSL -o /tmp/agy.tar.gz "https://storage.googleapis.com/antigravity-public/antigravity-cli/${AGY_VERSION}-${AGY_BUILD}/${path}" \
+    && echo "${sha}  /tmp/agy.tar.gz" | sha512sum -c - \
+    && tar -xzf /tmp/agy.tar.gz -C /tmp/agy \
+    && install -m 0755 /tmp/agy/antigravity /usr/local/bin/agy \
+    && rm -rf /tmp/agy /tmp/agy.tar.gz \
+    && agy --version
+ENV AGY_CLI_DISABLE_AUTO_UPDATE=true
 
 # Install once at image build; agent turns never download packages or browsers.
 COPY browser/package.json browser/package-lock.json /opt/mooi-browser/
