@@ -118,6 +118,10 @@ class Settings(BaseSettings):
     agent_claude_rtk: bool = True
     # Claude Code CLI the `cli` adapter launches (a name on PATH or a path); the image pins its version.
     agent_claude_cli: str = "claude"
+    # Gemini CLI both Gemini adapters launch (a name on PATH or a path); the image pins its version.
+    agent_gemini_cli: str = "gemini"
+    # Preselected Gemini model when the platform sets none: the CLI's own auto router.
+    agent_gemini_model: str = "auto"
     # Reconnections tried, with backoff, when a provider stream breaks before the session fails.
     agent_recovery_attempts: int = Field(default=3, ge=0, le=10)
 

@@ -3,17 +3,19 @@ import type { SessionUsage } from '@/features/sessions/types/SessionUsage';
 import type { SessionConfiguration } from '@/features/sessions/types/SessionConfiguration';
 import type { SessionProvider } from '@/features/sessions/types/SessionProvider';
 import { useEffect, useId, useLayoutEffect, useRef, useState, type DragEvent, type ReactNode } from 'react';
-import { ArrowUp, ImagePlus, MessageCircleQuestion, RotateCw, Square } from 'lucide-react';
+import { ArrowUp, ImagePlus, ListPlus, MessageCircleQuestion, RotateCw, Square } from 'lucide-react';
 import type { SessionStatus } from '@/features/sessions/types/SessionStatus';
 import { useDictation } from '@/features/dictation/hooks/useDictation';
 import { DictationButton } from '@/features/dictation/components/DictationButton';
 import { useImageDraft } from '@/features/sessions/hooks/useImageDraft';
 import { imageFilesFrom } from '@/features/sessions/lib/imageFilesFrom';
 import type { PreparedImage } from '@/features/sessions/types/PreparedImage';
+import type { QueuedMessage } from '@/features/sessions/types/QueuedMessage';
 import { AttachImageButton } from './AttachImageButton';
 import { ComposerImageStrip } from './ComposerImageStrip';
 import { ComposerModelMenu } from './ComposerModelMenu';
 import { ComposerSelect } from './ComposerSelect';
+import { QueuedMessageStack } from './QueuedMessageStack';
 import { SlashCommandMenu } from './SlashCommandMenu';
 import { matchSlashCommands } from '@/features/sessions/lib/matchSlashCommands';
 import { parseSlashCommand } from '@/features/sessions/lib/parseSlashCommand';
@@ -40,6 +42,11 @@ interface ChatComposerProps {
   /** The provider takes images; each model may still decline them. */
   acceptsImages?: boolean;
   onSend: (text: string, images: PreparedImage[]) => Promise<boolean>;
+  /** Messages waiting for the agent, oldest first. */
+  queue?: QueuedMessage[];
+  /** Queues a message while the agent is busy; it goes out when the agent finishes. */
+  onQueue: (text: string, images: PreparedImage[]) => Promise<boolean>;
+  onUnqueue: (messageId: string) => Promise<boolean>;
   onInterrupt: () => Promise<boolean>;
   /** The session failed with its agent and workspace intact: offer to reconnect it. */
   recoverable?: boolean;
@@ -61,8 +68,8 @@ const hints: Partial<Record<SessionStatus, string>> = {
   provisioning: 'Preparing the workspace…',
   failed: 'This session failed and no longer takes messages.',
   closed: 'This session is closed.',
-  compacting: 'Compacting context… Your draft is saved.',
 };
+const empty: QueuedMessage[] = [];
 const recoverableHint = 'The agent lost its connection. Your draft, workspace and changes are kept.';
 
 export const ChatComposer = ({
@@ -79,6 +86,9 @@ export const ChatComposer = ({
   hasConversation,
   acceptsImages = false,
   onSend,
+  queue = empty,
+  onQueue,
+  onUnqueue,
   onInterrupt,
   recoverable = false,
   onRecover,
@@ -111,13 +121,17 @@ export const ChatComposer = ({
   };
 
   const reconnectable = status === 'failed' && recoverable;
-  const hint = (reconnectable ? recoverableHint : hints[status]) ?? (deploying ? 'Deployment in progress. Your draft is saved; chat resumes when it finishes.' : null);
+  const hint = (reconnectable ? recoverableHint : hints[status]) ?? null;
   const blocked = hint !== null;
   const { finish } = dictation;
   useEffect(() => {
     if (blocked) finish();
   }, [blocked, finish]);
   const activeTurn = status === 'working' || status === 'waiting';
+  // The agent is busy: whatever the user sends now waits in the queue for its turn.
+  const queueing = !blocked && (activeTurn || status === 'compacting' || deploying);
+  const queueHint = status === 'compacting' ? 'Compacting context… Messages you send now wait in the queue.'
+    : deploying && !activeTurn ? 'Deployment in progress. Messages you send now wait in the queue until it finishes.' : null;
   const imagesReason = modelOptions.find((option) => option.id === model)?.images === false
     ? 'The selected model does not accept images' : null;
   const canAttach = acceptsImages && !blocked && !draft.full;
@@ -136,7 +150,7 @@ export const ChatComposer = ({
   const activeIndex = Math.min(menuIndex, suggestions.length - 1);
   const command = parseSlashCommand(value);
   const aside = command?.name === 'btw' && canAskAside ? command : null;
-  const asideReady = Boolean(aside?.argument) && !askingAside && !blocked;
+  const asideReady = Boolean(aside?.argument) && !askingAside && !blocked && status !== 'compacting';
   const imageStatus = draft.notice ?? (hasImages && imagesReason ? `${imagesReason}. Pick another model or remove them.` : null);
 
   const attach = (files: File[]) => {
@@ -181,7 +195,7 @@ export const ChatComposer = ({
       onAside(argument);
       return;
     }
-    if (blocked || activeTurn || busy || status !== 'ready' || !hasConversation) return;
+    if (blocked || activeTurn || busy || deploying || status !== 'ready' || !hasConversation) return;
     if (name === 'compact' && compactReason) return;
     dictation.finish();
     if (await (name === 'compact' ? onCompact(argument || undefined) : onClear())) {
@@ -208,20 +222,30 @@ export const ChatComposer = ({
 
     const text = value.trim();
 
-    if (!sendable || blocked || activeTurn || busy || status !== 'ready') {
+    if (!sendable || blocked || busy || (!queueing && status !== 'ready')) {
       return;
     }
 
     dictation.finish();
     const sent = readyImages;
-    if (!await onSend(text, sent.flatMap((image) => image.prepared ? [image.prepared] : []))) return;
+    const prepared = sent.flatMap((image) => image.prepared ? [image.prepared] : []);
+    if (!await (queueing ? onQueue(text, prepared) : onSend(text, prepared))) return;
     setValue((current) => current.trim() === text ? '' : current);
     draft.discard(sent.map((image) => image.key));
     resetHeight();
   };
 
+  const edit = async (message: QueuedMessage) => {
+    // Only a message still in the queue comes back: one already delivered must not be sent twice.
+    if (!await onUnqueue(message.id)) return;
+    setValue((current) => current.trim() ? `${message.text}\n\n${current}` : message.text);
+    textareaRef.current?.focus();
+  };
+
   return (
     <div className="mx-auto w-full max-w-[60rem] shrink-0 px-2.5 pt-2 pb-[max(0.625rem,var(--safe-bottom))] sm:px-8 sm:pt-3 sm:pb-6">
+      <QueuedMessageStack messages={queue} disabled={busy} onEdit={(message) => void edit(message)}
+        onRemove={(messageId) => void onUnqueue(messageId)} />
       <div
         onDragEnter={onDragOver}
         onDragOver={onDragOver}
@@ -296,7 +320,7 @@ export const ChatComposer = ({
               submit();
             }
           }}
-          placeholder={hint ? undefined : 'Describe the next change, or type / for commands…'}
+          placeholder={hint ? undefined : queueing ? 'Queue a follow-up for when the agent finishes…' : 'Describe the next change, or type / for commands…'}
           aria-describedby={instructions !== null ? 'compact-instructions-hint' : undefined}
           aria-label="Message the agent"
           aria-autocomplete="list"
@@ -309,7 +333,7 @@ export const ChatComposer = ({
         {instructions !== null ? <p id="compact-instructions-hint" role="status" className="px-4 pb-2 text-xs text-ink-muted sm:px-5">
           {compactReason ?? 'Optional instructions: what should the summary preserve or condense? Leave empty for standard compaction.'}
         </p> : null}
-        {hint ? <p role="status" className="px-4 pb-2 text-xs text-ink-muted sm:px-5">{hint}</p> : null}
+        {hint ?? queueHint ? <p role="status" className="px-4 pb-2 text-xs text-ink-muted sm:px-5">{hint ?? queueHint}</p> : null}
         {imageStatus ? <p role="status" className="px-4 pb-2 text-xs text-warning sm:px-5">{imageStatus}</p> : null}
 
         {aside && !blocked ? (
@@ -319,7 +343,7 @@ export const ChatComposer = ({
           </p>
         ) : activeTurn ? (
           <p className="px-4 pb-2 text-xs text-ink-muted sm:px-5">
-            Model and effort changes apply to your next message.{canAskAside ? <> Type <kbd className="font-mono font-semibold text-ink">/btw</kbd> to ask a side question meanwhile.</> : null}
+            <kbd className="font-mono font-semibold text-ink">Enter</kbd> queues a message for when the agent finishes. Model and effort changes apply to your next message.{canAskAside ? <> Type <kbd className="font-mono font-semibold text-ink">/btw</kbd> to ask a side question meanwhile.</> : null}
           </p>
         ) : null}
 
@@ -360,7 +384,7 @@ export const ChatComposer = ({
           </div>
 
           <div className="ml-auto flex shrink-0 items-center gap-1 sm:gap-1.5">
-            {!activeTurn && !blocked ? <span className="mr-1 hidden items-center gap-1 text-[11px] text-ink-subtle lg:flex"><kbd className="rounded border border-line bg-surface-2 px-1 font-mono text-[10px]">Enter</kbd> to send · <kbd className="rounded border border-line bg-surface-2 px-1 font-mono text-[10px]">Shift</kbd>+<kbd className="rounded border border-line bg-surface-2 px-1 font-mono text-[10px]">Enter</kbd> new line</span> : null}
+            {!activeTurn && !blocked ? <span className="mr-1 hidden items-center gap-1 text-[11px] text-ink-subtle lg:flex"><kbd className="rounded border border-line bg-surface-2 px-1 font-mono text-[10px]">Enter</kbd> {queueing ? 'to queue' : 'to send'} · <kbd className="rounded border border-line bg-surface-2 px-1 font-mono text-[10px]">Shift</kbd>+<kbd className="rounded border border-line bg-surface-2 px-1 font-mono text-[10px]">Enter</kbd> new line</span> : null}
 
             {acceptsImages && !blocked ? (
               <AttachImageButton onPick={attach} disabled={!canAttach} reason={imagesReason} className="max-sm:size-10" />
@@ -372,6 +396,11 @@ export const ChatComposer = ({
               <Button variant="brand" onClick={() => void submit()} disabled={!asideReady} ariaLabel="Ask side question"
                 className="size-10 shrink-0 p-0 sm:size-11">
                 <MessageCircleQuestion className="size-4" />
+              </Button>
+            ) : activeTurn && !blocked && sendable ? (
+              <Button variant="brand" onClick={() => void submit()} disabled={busy} ariaLabel="Queue message"
+                className="size-10 shrink-0 p-0 sm:size-11">
+                <ListPlus className="size-4" />
               </Button>
             ) : null}
 
@@ -396,10 +425,10 @@ export const ChatComposer = ({
                 variant="brand"
                 onClick={submit}
                 disabled={aside ? !asideReady : busy || !sendable}
-                ariaLabel={aside ? 'Ask side question' : 'Send message'}
+                ariaLabel={aside ? 'Ask side question' : queueing ? 'Queue message' : 'Send message'}
                 className="size-10 shrink-0 p-0 sm:size-11"
               >
-                {aside ? <MessageCircleQuestion className="size-4" /> : <ArrowUp className="size-4" />}
+                {aside ? <MessageCircleQuestion className="size-4" /> : queueing ? <ListPlus className="size-4" /> : <ArrowUp className="size-4" />}
               </Button>
             ) : null}
           </div>

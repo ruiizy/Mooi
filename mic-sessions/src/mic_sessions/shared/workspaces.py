@@ -233,6 +233,14 @@ class Workspaces:
             LOG.info("git %s exited with %s: %s", args[0], code, detail)
         return code == 0
 
+    async def _empty_tree(self, workspace: Path) -> str:
+        """The empty tree of the clone's object format: the base of an unborn branch."""
+        return (await self._git("-C", str(workspace), "mktree", stdin="")).strip()
+
+    async def _born(self, workspace: Path) -> bool:
+        """Whether HEAD names a commit; false on the unborn branch of an empty repository."""
+        return await self._git_ok("-C", str(workspace), "rev-parse", "-q", "--verify", "HEAD^{commit}")
+
     async def validate_branch(self, branch: str) -> None:
         """Rejects anything git would not accept as a branch name, or would read as an option."""
         if not _BRANCH_PATTERN.match(branch) or branch.startswith("-"):
@@ -255,11 +263,21 @@ class Workspaces:
             url = f"https://github.com/{project.full_name}.git"
             await self._git(*_NO_CREDENTIAL_HELPER, "clone", "--no-checkout", url, str(path), auth=token)
             remote = f"refs/remotes/origin/{branch}"
+            default = f"refs/remotes/origin/{project.default_branch}"
             if await self._git_ok("-C", str(path), "show-ref", "--verify", "--quiet", remote):
                 await self._git("-C", str(path), "checkout", "-B", branch, "--track", f"origin/{branch}")
+            elif await self._git_ok("-C", str(path), "show-ref", "--verify", "--quiet", default):
+                await self._git("-C", str(path), "checkout", "--no-track", "-b", branch, default)
+            elif not (await self._git("-C", str(path), "for-each-ref", "--count=1", "refs/remotes")).strip():
+                # An empty repository: the session starts on an unborn branch whose base is the
+                # empty tree, and its first merge creates the default branch.
+                await self._git("-C", str(path), "symbolic-ref", "HEAD", f"refs/heads/{branch}")
+                base_tree = await self._empty_tree(path)
+                LOG.info("Workspace %s created on %s from an empty repository", session_id, branch)
+                return SessionWorkspace(path=path, base_commit=base_tree)
             else:
-                await self._git("-C", str(path), "checkout", "--no-track", "-b", branch,
-                                f"refs/remotes/origin/{project.default_branch}")
+                raise ApiException.conflict(
+                    f"The default branch {project.default_branch} was not found in {project.full_name}")
             base_commit = (await self._git("-C", str(path), "rev-parse", "HEAD")).strip()
             LOG.info("Workspace %s created on %s at %s", session_id, branch, base_commit[:7])
             return SessionWorkspace(path=path, base_commit=base_commit)
@@ -378,10 +396,20 @@ class Workspaces:
 
     # --- merge into the target branch ----------------------------------------------------------
 
-    async def _fetch(self, workspace: Path, target: str, token: str) -> None:
+    async def _fetch(self, workspace: Path, target: str, token: str) -> bool:
+        """Fetches the target branch; false when the repository does not have it (yet), e.g. an
+        empty repository whose first merge creates it."""
         await self.validate_branch(target)
-        await self._git(*_NO_CREDENTIAL_HELPER, "-C", str(workspace), "fetch", "--no-tags", "origin",
-                        f"+refs/heads/{target}:refs/remotes/origin/{target}", auth=token)
+        remote = f"refs/remotes/origin/{target}"
+        code, _, detail = await self._run(*_NO_CREDENTIAL_HELPER, "-C", str(workspace), "fetch", "--no-tags",
+                                          "origin", f"+refs/heads/{target}:{remote}", auth=token)
+        if code == 0:
+            return True
+        if "couldn't find remote ref" in detail:
+            await self._git_ok("-C", str(workspace), "update-ref", "-d", remote)
+            return False
+        LOG.warning("git fetch failed with %s: %s", code, detail or "no output")
+        raise ApiException.bad_gateway(detail or "The git command failed")
 
     async def _snapshot(self, workspace: Path) -> str:
         """Commits the working tree, untracked files included, as a dangling child of HEAD.
@@ -393,15 +421,18 @@ class Workspaces:
             raise ApiException.conflict("A merge is in progress in the workspace; finish it in the chat first")
         git_dir = Path((await self._git("-C", str(workspace), "rev-parse", "--absolute-git-dir")).strip())
         index = git_dir / f"mooi-snapshot-{uuid4().hex}.index"
+        born = await self._born(workspace)
         try:
             if (git_dir / "index").is_file():
                 await asyncio.to_thread(shutil.copyfile, git_dir / "index", index)
             env = {"GIT_INDEX_FILE": str(index), **_identity_env(_SNAPSHOT_IDENTITY)}
             if not index.exists():
-                await self._git("-C", str(workspace), "read-tree", "HEAD", extra_env=env)
+                await self._git("-C", str(workspace), "read-tree", *(("HEAD",) if born else ("--empty",)),
+                                extra_env=env)
             await self._git("-C", str(workspace), "add", "-A", extra_env=env)
             tree = (await self._git("-C", str(workspace), "write-tree", extra_env=env)).strip()
-            return (await self._git("-C", str(workspace), "commit-tree", tree, "-p", "HEAD",
+            parent = ("-p", "HEAD") if born else ()
+            return (await self._git("-C", str(workspace), "commit-tree", tree, *parent,
                                     "-m", "Mooi snapshot", extra_env=env)).strip()
         finally:
             index.unlink(missing_ok=True)
@@ -414,9 +445,14 @@ class Workspaces:
     async def preview_merge(self, workspace: Path, target: str, token: str) -> MergePreview:
         """Fetches the target and merges the working tree into it in memory (`git merge-tree`),
         never touching the checkout, so a conflict leaves the workspace exactly as it was."""
-        await self._fetch(workspace, target, token)
+        exists = await self._fetch(workspace, target, token)
         remote = f"refs/remotes/origin/{target}"
         snapshot = await self._snapshot(workspace)
+        if not exists:
+            # The target does not exist yet: merging creates it holding the working tree.
+            tree = (await self._git("-C", str(workspace), "rev-parse", f"{snapshot}^{{tree}}")).strip()
+            return MergePreview(target=target, tree=tree, conflicts=[],
+                                up_to_date=tree == await self._empty_tree(workspace), merge_base=None)
         code, stdout, detail = await self._run(
             "-C", str(workspace), "merge-tree", "--write-tree", "--name-only", "--no-messages", "-z",
             snapshot, remote,
@@ -450,8 +486,12 @@ class Workspaces:
         if preview.conflicts or preview.up_to_date:
             return preview, None
         env = _identity_env(identity)
+        remote = f"refs/remotes/origin/{target}"
+        # A target the preview did not find is created by a root commit.
+        parent = ("-p", remote) if await self._git_ok("-C", str(workspace), "show-ref", "--verify", "--quiet",
+                                                      remote) else ()
         commit = (await self._git("-C", str(workspace), "commit-tree", preview.tree,
-                                  "-p", f"refs/remotes/origin/{target}", "-m", message, extra_env=env)).strip()
+                                  *parent, "-m", message, extra_env=env)).strip()
         code, _, detail = await self._run(*_NO_CREDENTIAL_HELPER, "-C", str(workspace), "push", "--porcelain",
                                           "origin", f"{commit}:refs/heads/{target}", auth=token)
         if code != 0:
@@ -569,7 +609,8 @@ class Workspaces:
             if (git_dir / "index").is_file():
                 await asyncio.to_thread(shutil.copyfile, git_dir / "index", index)
             else:
-                await self._git("-C", str(workspace), "read-tree", "HEAD", extra_env=env)
+                await self._git("-C", str(workspace), "read-tree",
+                                *(("HEAD",) if await self._born(workspace) else ("--empty",)), extra_env=env)
             if untracked:
                 await self._git("--literal-pathspecs", "-C", str(workspace), "add", "--intent-to-add",
                                 "--pathspec-from-file=-", "--pathspec-file-nul", extra_env=env,

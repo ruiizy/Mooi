@@ -2,7 +2,7 @@
 
 Each provider already writes a complete, timestamped log of its conversation: Claude Code a JSONL
 transcript per conversation under its config directory (plus one per sub-agent), Codex one rollout
-JSONL per thread. This module turns those native logs into one provider-neutral trace, the shape
+JSONL per thread, the Gemini CLI one session JSONL per conversation (plus one per sub-agent beside it). This module turns those native logs into one provider-neutral trace, the shape
 observability platforms use: prompts (one user request each), turns (one agent-loop iteration: a model
 call with its exact token usage, then the tools, sub-agents and skills it requested), hooks, context
 events and compactions, each a timed span in one tree.
@@ -36,7 +36,7 @@ from typing import Any, ClassVar, Literal
 
 from mic_sessions.shared.env import get_settings
 
-TraceFormat = Literal["claude", "codex"]
+TraceFormat = Literal["claude", "codex", "gemini"]
 
 KIND_PROMPT = "prompt"
 KIND_TURN = "turn"
@@ -91,7 +91,8 @@ _CODEX_CONTEXT_PREFIXES = ("<environment_context>", "<user_instructions>", "<per
 
 @dataclass(frozen=True)
 class TraceSource:
-    """Where a runtime's native log lives: a Claude Code `projects` directory or one Codex rollout file."""
+    """Where a runtime's native log lives: a Claude Code `projects` directory, one Codex rollout file or
+    one Gemini CLI session file."""
 
     format: TraceFormat
     path: Path
@@ -809,6 +810,158 @@ class _CodexParser(_Parser):
         span.close(at)
 
 
+class _GeminiParser(_Parser):
+    """Gemini CLI session logs: a metadata line, then one record per message (`user`, `gemini`, `info`,
+    `warning`, `error`). A message is appended again, under the same id, whenever it changes (its tokens
+    or tool results arrive later), so every span is keyed by the message and updated in place. A
+    `gemini` message is one model call: its text, thoughts, token usage and the tool calls it requested
+    with their results. A reply without tool calls ends the prompt."""
+
+    def __init__(self, reader: TraceReader, path: Path, key: str, agent: str | None = None) -> None:
+        super().__init__(reader, path, key)
+        self.agent = agent
+        self.root: str | None = f"agent:{agent}" if agent else None
+        self.prompt: str | None = None
+        self.ready_at: float | None = None
+        self.calls: dict[str, Span] = {}
+
+    def feed(self, entry: dict[str, Any]) -> None:
+        kind = entry.get("type")
+        if kind is None:
+            if isinstance(entry.get("sessionId"), str) and not self.agent and "$set" not in entry:
+                self.reader.metadata.update({"provider": "gemini", "sessionKind": entry.get("kind") or "main"})
+            return
+        at = _timestamp(entry.get("timestamp"))
+        message_id = str(entry.get("id") or "")
+        if at is None or not message_id:
+            return
+        if kind == "user":
+            self._user(entry, message_id, at)
+        elif kind == "gemini":
+            self._model(entry, message_id, at)
+        elif kind in ("info", "warning", "error"):
+            text = _gemini_text(entry.get("content"))
+            span = self.reader.add(Span(id=f"{self.key}:evt:{message_id}", kind=KIND_EVENT, name=str(kind).capitalize(),
+                                        start=at, parent=self.prompt or self.root, output=self.reader.clip(text),
+                                        preview=_line(text)))
+            span.close(at, STATUS_ERROR if kind == "error" else STATUS_OK)
+
+    def _user(self, entry: dict[str, Any], message_id: str, at: float) -> None:
+        text = _gemini_text(entry.get("displayContent") or entry.get("content"))
+        if self.root:
+            # A sub-agent's task is the prompt it was given: its turns sit directly under the sub-agent.
+            self.prompt = self.prompt or self.root
+            self.ready_at = self.ready_at or at
+            return
+        span_id = f"{self.key}:prompt:{message_id}"
+        if not self.reader.has(span_id):
+            self._end_prompt(at)
+            self.loop = 0
+            self.reader.add(Span(id=span_id, kind=KIND_PROMPT, name=f"Prompt {self.reader.next_prompt()}", start=at,
+                                 title=_line(text, _TITLE_CHARS), preview=_line(text), input=self.reader.clip(text)))
+            self.ready_at = at
+        self.prompt = span_id
+
+    def _end_prompt(self, at: float) -> None:
+        prompt = self.reader.get(self.prompt or "")
+        if prompt is not None and prompt.end is None and prompt.kind == KIND_PROMPT:
+            prompt.close(at)
+
+    def _model(self, entry: dict[str, Any], message_id: str, at: float) -> None:
+        call = self.calls.get(message_id)
+        if call is None:
+            if self.prompt is None:
+                self._user({}, f"implicit-{message_id}", at)
+            started = min(self.ready_at if self.ready_at is not None else at, at)
+            turn = self._open_turn(f"{self.key}:turn:{message_id}", started, self.prompt)
+            model = entry.get("model") if isinstance(entry.get("model"), str) else None
+            call = self.reader.add(Span(id=f"{self.key}:llm:{message_id}", kind=KIND_LLM, name=model or "Model call",
+                                        start=started, parent=turn.id, model=model))
+            self.calls[message_id] = call
+            if len(self.calls) > 512:
+                self.calls.pop(next(iter(self.calls)))
+        tokens = entry.get("tokens") if isinstance(entry.get("tokens"), dict) else None
+        if tokens:
+            cached = _int(tokens.get("cached"))
+            prompt_tokens = _int(tokens.get("input"))
+            call.usage = {"input": max(0, prompt_tokens - cached), "cacheRead": cached, "cacheWrite": 0,
+                          "output": _int(tokens.get("output")), "reasoning": _int(tokens.get("thoughts")),
+                          "context": prompt_tokens}
+        thoughts = [f"[thought] {thought.get('subject') or ''}\n{thought.get('description') or ''}".strip()
+                    for thought in entry.get("thoughts") or [] if isinstance(thought, dict)]
+        text = _gemini_text(entry.get("content"))
+        tools = [tool for tool in entry.get("toolCalls") or [] if isinstance(tool, dict)]
+        for tool in tools:
+            self._tool(tool, call, at)
+        call.output = self.reader.clip("\n\n".join(part for part in [*thoughts, text, *(
+            f"[tool call] {tool.get('name')}" for tool in tools)] if part))
+        call.preview = _line(text) or call.preview
+        if thoughts:
+            call.metadata["reasoning"] = True
+        call.close(at)
+        self._describe_turn(call)
+        self.ready_at = at
+        if not tools and text:
+            self._end_prompt(at)
+
+    def _tool(self, tool: dict[str, Any], call: Span, at: float) -> None:
+        call_id = str(tool.get("id") or f"{call.id}:{tool.get('name')}")
+        name = str(tool.get("name") or "tool")
+        args = tool.get("args") if isinstance(tool.get("args"), dict) else {}
+        title = _claude_tool_title(name, args) or _line(str(tool.get("description") or ""), _TITLE_CHARS)
+        started = _timestamp(tool.get("timestamp")) or at
+        span = self.reader.add(Span(id=f"{self.key}:tool:{call_id}", kind=KIND_AGENT if name == "invoke_agent" else KIND_TOOL,
+                                    name=name, title=title, start=started, parent=call.parent,
+                                    input=self.reader.clip(_render(args)), preview=title))
+        span.metadata = {"call": call.id, "callId": call_id}
+        if span.name not in call.metadata.setdefault("tools", []):
+            call.metadata["tools"].append(span.name)
+        status = tool.get("status")
+        if status in ("success", "error", "cancelled"):
+            display = tool.get("resultDisplay")
+            output = display if isinstance(display, str) and display else _gemini_result(tool.get("result"))
+            span.output = self.reader.clip(output)
+            span.preview = _line(output) or span.preview
+            span.close(at, STATUS_OK if status == "success" else STATUS_INTERRUPTED if status == "cancelled"
+                       else STATUS_ERROR)
+
+
+def _gemini_text(content: Any) -> str:
+    """Text of a Gemini message: a string, or `Part`s whose inline data and file parts become markers."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        content = [content]
+    if not isinstance(content, list):
+        return _render(content)
+    parts: list[str] = []
+    for part in content:
+        if isinstance(part, str):
+            parts.append(part)
+        elif isinstance(part, dict):
+            if isinstance(part.get("text"), str):
+                parts.append(part["text"])
+            elif "inlineData" in part:
+                parts.append("[image]" if str((part["inlineData"] or {}).get("mimeType", "")).startswith("image/")
+                             else "[file]")
+            elif "fileData" in part:
+                parts.append("[file]")
+    return "\n".join(item for item in parts if item)
+
+
+def _gemini_result(result: Any) -> str:
+    """A tool call's recorded result: the `functionResponse` parts sent back to the model."""
+    texts = []
+    for part in result if isinstance(result, list) else [result]:
+        response = part.get("functionResponse") if isinstance(part, dict) else None
+        if isinstance(response, dict):
+            body = response.get("response")
+            texts.append(_render(body.get("output") if isinstance(body, dict) and "output" in body else body))
+        elif part is not None:
+            texts.append(_gemini_text(part))
+    return "\n".join(text for text in texts if text)
+
+
 @dataclass
 class _File:
     path: Path
@@ -901,6 +1054,18 @@ class TraceReader:
 
     def _discover(self, source: TraceSource) -> Iterable[tuple[Path, Path, Callable[[], _Parser]]]:
         """Each log file under `source` with the root its download name is relative to, and its parser."""
+        if source.format == "gemini":
+            # `<GEMINI_CLI_HOME>/.gemini/tmp/<project>/chats/session-….jsonl`; a sub-agent's log sits in a
+            # folder named after its parent conversation. Names keep the project folder.
+            root = source.path.parents[2]
+            yield source.path, root, lambda: _GeminiParser(self, source.path, "gemini")
+            prefix = source.path.stem.rsplit("-", 1)[-1]
+            for folder in sorted(source.path.parent.glob(f"{prefix}*")):
+                if not folder.is_dir():
+                    continue
+                for path in sorted(folder.glob("*.jsonl")):
+                    yield path, root, lambda path=path: _GeminiParser(self, path, f"a{path.stem[:8]}", path.stem)
+            return
         if source.format == "codex":
             # `<CODEX_HOME>/sessions/YYYY/MM/DD/rollout-….jsonl`: names keep the date folders.
             sessions = source.path.parents[3]

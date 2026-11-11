@@ -50,7 +50,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Protocol, TypedDict, runtime_checkable
 from uuid import UUID, uuid4
 
-# The single import of a vendor SDK in the whole service belongs to the Claude SDK adapter, and a second provider's SDK must stay confined to its own adapter the same way. The Claude CLI adapter imports none: it drives the CLI through `claude_cli`.
+# The single import of a vendor SDK in the whole service belongs to the Claude SDK adapter, and a second provider's SDK must stay confined to its own adapter the same way. The Claude CLI adapter imports none: it drives the CLI through `claude_cli`; the Gemini adapters import none either: they drive the Gemini CLI through `gemini`.
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -2721,6 +2721,697 @@ class CodexAgentRuntime:
             await self._publish(tool_result(identity, failed, _result_summary(item)))
 
 
+# --- Gemini --------------------------------------------------------------------------------------
+
+GEMINI_CAPABILITIES = AgentCapabilities(streaming=True, thinking=True, interrupt=True, images=True)
+# One headless process per turn: no thoughts in its stream and no image input, so it declares neither.
+GEMINI_CLI_CAPABILITIES = AgentCapabilities(streaming=True, interrupt=True)
+
+_GEMINI_CONDUCT = conduct_instructions(edit_tools="the write_file and replace tools")
+# Every Gemini model the CLI routes to has a one-million-token window (the CLI's own `tokenLimit`).
+_GEMINI_CONTEXT_WINDOW = 1_048_576
+_GEMINI_COMPACTION = ("Gemini compresses its context by itself when the conversation grows; "
+                      "manual compaction is not available for Gemini sessions.")
+# Gemini tools -> the shared tool vocabulary and its input shape, so every provider renders alike.
+_GEMINI_TOOLS: dict[str, tuple[str, Callable[[dict[str, Any]], dict[str, Any]]]] = {
+    "run_shell_command": ("Bash", lambda args: {"command": args.get("command"), "description": args.get("description")}),
+    "read_file": ("Read", lambda args: {"file_path": args.get("file_path") or args.get("absolute_path")}),
+    "read_many_files": ("Read", lambda args: {"file_path": ", ".join(map(str, args.get("include") or []))}),
+    "write_file": ("Write", lambda args: {"file_path": args.get("file_path"), "content": args.get("content")}),
+    "replace": ("Edit", lambda args: {"file_path": args.get("file_path"), "old_string": args.get("old_string"),
+                                      "new_string": args.get("new_string")}),
+    "glob": ("Glob", lambda args: {"pattern": args.get("pattern"), "path": args.get("dir_path")}),
+    "grep_search": ("Grep", lambda args: {"pattern": args.get("pattern"), "path": args.get("dir_path"),
+                                          "glob": args.get("include_pattern")}),
+    "list_directory": ("LS", lambda args: {"path": args.get("dir_path")}),
+    "google_web_search": ("WebSearch", lambda args: {"query": args.get("query")}),
+    "web_fetch": ("WebFetch", lambda args: {"prompt": args.get("prompt"), "url": next(
+        (word for word in str(args.get("prompt") or "").split() if word.startswith(("http://", "https://"))), None)}),
+    "write_todos": ("TodoWrite", lambda args: {"todos": [
+        {"content": item.get("description"), "status": item.get("status")}
+        for item in args.get("todos") or [] if isinstance(item, dict)]}),
+    "activate_skill": ("Skill", lambda args: {"skill": args.get("name")}),
+    "invoke_agent": ("Agent", lambda args: {key: value for key, value in args.items() if isinstance(value, (str, int, float))}),
+}
+# ACP reports a tool by kind, title and the files it touches, never by its name.
+_GEMINI_KINDS = {"read": "Read", "edit": "Edit", "delete": "Edit", "move": "Edit", "search": "Grep",
+                 "execute": "Bash", "fetch": "WebFetch", "think": "Think"}
+
+
+def _gemini_tool(name: str, args: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    mapped = _GEMINI_TOOLS.get(name)
+    if mapped is None:
+        return name or "Tool", args
+    tool, shape = mapped
+    return tool, {key: value for key, value in shape(args).items() if value not in (None, "", [])}
+
+
+def _gemini_acp_tool(update: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
+    """`(name, title, input)` of an ACP tool call in the shared vocabulary: the title is what Gemini
+    shows (a command line, a path, a query) and the first location is the file the call touches."""
+    kind = str(update.get("kind") or "other")
+    name = _GEMINI_KINDS.get(kind, "Tool")
+    title = str(update.get("title") or name)
+    locations = update.get("locations") if isinstance(update.get("locations"), list) else []
+    path = next((item.get("path") for item in locations if isinstance(item, dict) and item.get("path")), None)
+    diff = next((item for item in update.get("content") or [] if isinstance(item, dict) and item.get("type") == "diff"), None)
+    if diff is not None:
+        path = diff.get("path") or path
+        kind_meta = (diff.get("_meta") or {}).get("kind") if isinstance(diff.get("_meta"), dict) else None
+        name = "Write" if kind_meta == "add" else "Edit"
+        input_data: dict[str, Any] = {"file_path": path, "old_string": diff.get("oldText") or "",
+                                      "new_string": diff.get("newText") or ""}
+        if kind_meta == "delete" or kind == "delete":
+            input_data["operation"] = "delete"
+        return name, _tool_title(name, input_data), input_data
+    if name == "Bash":
+        input_data = {"command": title}
+    elif name in ("Read", "Edit"):
+        input_data = {"file_path": path or title}
+    elif name == "Grep":
+        input_data = {"pattern": title}
+    elif name == "WebFetch":
+        input_data = {"prompt": title}
+    else:
+        input_data = {"title": title}
+    return name, title[:_TITLE_LIMIT], input_data
+
+
+def _gemini_content_summary(content: Any) -> str:
+    """Readable text of ACP tool call content: its text blocks, or the diff it applied."""
+    parts = []
+    for item in content if isinstance(content, list) else []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "content" and isinstance(item.get("content"), dict):
+            parts.append(_block_summary(item["content"]))
+        elif item.get("type") == "diff":
+            parts.append(f"Updated {item.get('path') or 'file'}")
+    return _result_summary("\n".join(part for part in parts if part))
+
+
+class _GeminiRuntime:
+    """What both Gemini adapters share: the account's model catalog, the private Gemini home (settings,
+    credential, instructions and session logs, removed on close), usage, credential renewal and traces.
+    Subclasses implement the conversation over one of the CLI's two programmatic interfaces."""
+
+    capabilities: ClassVar[AgentCapabilities] = GEMINI_CAPABILITIES
+    _catalog: ClassVar[ContextVar[dict[str, Any] | None]] = ContextVar('gemini_catalog', default=None)
+    _label: ClassVar[str] = "Gemini"
+
+    @classmethod
+    async def load_configuration(cls, credential: Credential, refresh: bool = False) -> None:
+        from mic_sessions.shared import gemini
+        settings = get_settings()
+        with tempfile.TemporaryDirectory(prefix="mooi-gemini-models-") as scratch:
+            try:
+                entries = await gemini.models(credential, settings.agent_gemini_cli, Path(scratch), refresh=refresh)
+            except Exception:
+                LOG.warning("Could not load Gemini models", exc_info=True)
+                raise ApiException(502, "Could not load Gemini models. Check your account connection and try again.") from None
+        models = [{"id": entry["id"], "label": entry["label"], "contextWindow": _GEMINI_CONTEXT_WINDOW,
+                   "efforts": [], "images": True} for entry in entries]
+        if not models:
+            raise ApiException(502, "Gemini returned no available models. Check your account connection and try again.")
+        preferred = settings.agent_gemini_model
+        default = next((item for item in models if item["id"] == preferred), models[0])
+        cls._catalog.set({"id": "gemini", "label": "Gemini", "models": models,
+                          "defaultModel": default["id"], "defaultEffort": None})
+
+    @classmethod
+    def configuration(cls) -> dict[str, Any]:
+        return cls._catalog.get() or {"id": "gemini", "label": "Gemini", "models": [],
+                                      "defaultModel": "", "defaultEffort": None}
+
+    @classmethod
+    def configure(cls, model: str | None, effort: str | None) -> AgentConfig:
+        """Gemini has no per-request effort: the CLI sets each model's thinking itself, so none is kept."""
+        catalog = cls.configuration()
+        chosen = model or catalog["defaultModel"]
+        if not any(item["id"] == chosen for item in catalog["models"]):
+            raise ApiException.bad_request("Unsupported Gemini model; refresh the model list")
+        return AgentConfig(chosen, None)
+
+    def __init__(self, credential: Credential, workspace: Path, branch: str, emit: Emit, ask: Ask,
+                 config: AgentConfig, *, instructions: str = "", environment: Mapping[str, str] | None = None) -> None:
+        self._credential, self._workspace, self._branch = credential, workspace, branch
+        self._emit, self._ask, self._config = emit, ask, config
+        self._instructions = instructions
+        self._environment = dict(environment or {})
+        self._home: Path | None = None
+        self._task: asyncio.Task[None] | None = None
+        self._interrupted = False
+        self._closing = False
+        self._last_quota: dict[str, Any] | None = None
+        # Gemini conversation ids this runtime used, oldest first: each one names a session log.
+        self._session_ids: list[str] = []
+
+    async def _publish(self, event: AgentEvent) -> None:
+        await self._emit(event["type"], event["data"])
+
+    def _binary(self) -> str:
+        from mic_sessions.shared import gemini
+        return gemini.executable(get_settings().agent_gemini_cli)
+
+    async def _prepare(self) -> None:
+        """Validates the checkout and writes the private home, outside the checkout but inside the owned
+        session directory, so workspace reconciliation removes it after an unclean service exit."""
+        from mic_sessions.shared import gemini
+        self._workspace = await asyncio.to_thread(_validate_agent_workspace, self._workspace, self._branch)
+        if self._home is None:
+            self._home = Path(tempfile.mkdtemp(prefix="gemini-", dir=self._workspace.parent))
+        instructions = "\n\n".join(filter(None, [_GEMINI_CONDUCT, self._instructions]))
+        await asyncio.to_thread(gemini.prepare_home, self._home, self._credential, instructions=instructions,
+                                environment=self._environment)
+
+    def _process_env(self) -> dict[str, str]:
+        from mic_sessions.shared import gemini
+        if self._home is None:
+            raise RuntimeError("The Gemini runtime home was not prepared")
+        return gemini.environment(self._home, self._credential, self._environment)
+
+    async def _emit_context(self, used: int | None, limit: int | None = None) -> None:
+        window = limit or _GEMINI_CONTEXT_WINDOW
+        await self._emit("session.usage", {"context": {
+            "percent": used / window * 100 if used is not None and window else None,
+            "usedTokens": used, "limitTokens": window, "updatedAt": time.time()}})
+
+    async def _refresh_quota(self, *, refresh: bool = False) -> None:
+        from mic_sessions.shared import gemini
+        quota = await gemini.quota(self._credential, refresh=refresh)
+        if quota != self._last_quota:
+            self._last_quota = quota
+            await self._emit("session.usage", {"quota": quota})
+
+    async def refresh_usage(self) -> None:
+        if not self._closing:
+            await self._refresh_quota()
+
+    async def refresh_credential(self, credential: Credential) -> None:
+        """The platform renews the Google sign-in before each turn. A live CLI keeps renewing on its own
+        with the shared refresh token, so the renewed grant only replaces the cached one on disk."""
+        from mic_sessions.shared import gemini
+        if credential.connection_id != self._credential.connection_id:
+            raise ApiException.conflict("The Gemini account changed. Create a new session.")
+        self._credential = credential
+        if self._home is not None:
+            await asyncio.to_thread(gemini.write_credential, self._home, credential)
+
+    async def set_configuration(self, config: AgentConfig) -> AgentConfig:
+        self._config = config
+        return config
+
+    async def compact(self, instructions: str | None = None) -> None:
+        raise ApiException.conflict(_GEMINI_COMPACTION)
+
+    async def aside(self, question: str) -> AsyncIterator[str]:
+        raise ApiException.conflict("Side questions are not available for Gemini sessions")
+        yield ""  # pragma: no cover - makes this an async generator like the protocol's
+
+    def trace_sources(self) -> Sequence[TraceSource]:
+        """Each conversation's session log under the private home (its sub-agent logs sit beside it)."""
+        from mic_sessions.shared import gemini
+        if self._home is None:
+            return []
+        logs = (gemini.find_log(self._home, session_id) for session_id in self._session_ids)
+        return [TraceSource("gemini", path) for path in logs if path is not None]
+
+    async def _context_from_log(self, session_id: str | None) -> None:
+        from mic_sessions.shared import gemini
+        if self._home is None or session_id is None:
+            return
+        log = await asyncio.to_thread(gemini.find_log, self._home, session_id)
+        if log is not None:
+            used, _ = await asyncio.to_thread(gemini.last_context, log)
+            if used is not None:
+                await self._emit_context(used)
+
+    async def _cleanup_home(self) -> None:
+        if self._home is None:
+            return
+        cleanup = asyncio.create_task(asyncio.to_thread(shutil.rmtree, self._home, True))
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            await cleanup
+            self._home = None
+            raise
+        self._home = None
+
+
+class _GeminiStream:
+    """Turns Gemini's streamed text and thoughts into assistant and thinking messages: consecutive chunks
+    of one kind are one message, closed (with its full text) as soon as anything else happens."""
+
+    def __init__(self, publish: Callable[[AgentEvent], Awaitable[None]]) -> None:
+        self._publish = publish
+        self._kind: str | None = None
+        self._id = ""
+        self._parts: list[str] = []
+
+    async def chunk(self, kind: str, text: str) -> None:
+        if not text:
+            return
+        if kind != self._kind:
+            await self.close()
+            self._kind, self._id = kind, uuid4().hex
+        if kind == "thinking" and self._parts:
+            text = "\n\n" + text
+        self._parts.append(text)
+        await self._publish(assistant_delta(self._id, text) if kind == "assistant" else thinking_delta(self._id, text))
+
+    async def close(self) -> None:
+        if self._kind and self._parts:
+            text = "".join(self._parts)
+            await self._publish(assistant_message(self._id, text) if self._kind == "assistant"
+                                else thinking_message(self._id, text))
+        self._kind, self._parts = None, []
+
+
+class GeminiAcpAgentRuntime(_GeminiRuntime):
+    """Gemini through the Agent Client Protocol (`gemini --acp`), the CLI's programmatic interface.
+
+    One process per session keeps one ACP session across turns, so a message starts its turn at once.
+    It runs in YOLO mode (full access, like the other providers: Gemini asks for no approvals) with the
+    shared browser. A broken process costs only its running turn: `recover()` relaunches it and loads
+    the conversation the CLI saved (`session/load`), whose replayed history never reaches the transcript.
+    """
+
+    capabilities: ClassVar[AgentCapabilities] = GEMINI_CAPABILITIES
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._acp: Any = None
+        self._session_id: str | None = None
+        self._loading = False
+        self._stream = _GeminiStream(self._publish)
+        # ACP tool call id -> (name, title, input) of a call whose `tool.use` waits for its diff.
+        self._deferred: dict[str, tuple[str, str, dict[str, Any]]] = {}
+        self._open_steps: set[str] = set()
+        self._recovery_lock = asyncio.Lock()
+        self._context_limit: int | None = None
+
+    async def start(self) -> None:
+        started_at = time.perf_counter()
+        await self._prepare()
+        await self._connect()
+        await self._emit_context(0)
+        try:
+            await self._refresh_quota()
+        except Exception:
+            LOG.debug("Initial Gemini account usage is unavailable")
+        LOG.info("Gemini ACP runtime connected in %.0f ms", (time.perf_counter() - started_at) * 1000)
+
+    async def _connect(self) -> None:
+        """Launches the CLI and opens (or reloads) the conversation on the selected model."""
+        from mic_sessions.shared import gemini
+        acp = gemini.Acp([self._binary(), "--acp", "--approval-mode", "yolo"], cwd=self._workspace,
+                         env=self._process_env(), updates=self._on_update, requests=self._on_request)
+        try:
+            await acp.start()
+            params = {"cwd": str(self._workspace), "mcpServers": []}
+            if self._session_id is None:
+                session = await acp.request("session/new", params)
+                self._session_id = str(session["sessionId"])
+                self._session_ids.append(self._session_id)
+            else:
+                self._loading = True
+                try:
+                    session = await acp.request("session/load", {**params, "sessionId": self._session_id}, timeout=120)
+                finally:
+                    self._loading = False
+            current = ((session or {}).get("models") or {}).get("currentModelId")
+            if current != self._config.model:
+                await acp.request("session/set_model", {"sessionId": self._session_id, "modelId": self._config.model})
+        except BaseException:
+            await acp.close()
+            raise
+        previous, self._acp = self._acp, acp
+        if previous is not None:
+            await previous.close()
+
+    def _require_acp(self) -> Any:
+        if self._closing or self._acp is None:
+            raise ApiException.conflict("Gemini session is closed")
+        return self._acp
+
+    async def send(self, text: str, images: Sequence[Image] = ()) -> None:
+        acp = self._require_acp()
+        if self._task and not self._task.done():
+            raise ApiException.conflict("A Gemini turn is already running")
+        self._interrupted = False
+        prompt = await asyncio.to_thread(lambda: [
+            {"type": "image", "mimeType": image.media_type, "data": image.base64()} for image in images])
+        if text:
+            prompt.append({"type": "text", "text": text})
+        self._task = asyncio.create_task(self._run(acp, prompt))
+        await asyncio.sleep(0)
+
+    async def _run(self, acp: Any, prompt: list[dict[str, Any]]) -> None:
+        from mic_sessions.shared import gemini
+        terminal, subtype, usage = "error", None, None
+        # A broken process is reported by its recovery, which ends the turn itself.
+        recovering = False
+        started = time.monotonic()
+        try:
+            result = await acp.request("session/prompt", {"sessionId": self._session_id, "prompt": prompt}, timeout=None)
+            reason = (result or {}).get("stopReason")
+            terminal = "interrupted" if reason == "cancelled" or self._interrupted else "completed"
+            subtype = reason if reason not in ("end_turn", "cancelled") else None
+            tokens = (result or {}).get("usage") or {}
+            usage = {"input_tokens": tokens.get("inputTokens"), "output_tokens": tokens.get("outputTokens"),
+                     "cache_read_input_tokens": tokens.get("cachedReadTokens")} if tokens else None
+        except asyncio.CancelledError:
+            terminal = "interrupted"
+            raise
+        except gemini.GeminiError as error:
+            if self._interrupted:
+                terminal = "interrupted"
+            elif not acp.alive and not self._closing:
+                recovering = True
+            else:
+                await self._publish(agent_error(_gemini_failure(error)))
+        except Exception:
+            LOG.exception("The Gemini turn failed")
+            await self._publish(agent_error("Gemini could not complete the turn. Check your account and try again."))
+        finally:
+            await self._stream.close()
+            await self._close_open_steps()
+            if not self._closing and not recovering:
+                await self._publish(turn_result(terminal, subtype=subtype,
+                                               duration_ms=int((time.monotonic() - started) * 1000), usage=usage))
+        if recovering:
+            await self._recover_stream(acp.failure or RuntimeError("the agent process exited"))
+            return
+        try:
+            await self._refresh_quota()
+        except Exception:
+            LOG.debug("Gemini quota is unavailable")
+
+    async def _close_open_steps(self) -> None:
+        """A step the turn left open (interrupted mid-call) ends as failed, so nothing spins forever."""
+        for identity, (name, title, input_data) in list(self._deferred.items()):
+            await self._publish(tool_use(identity, name, title, input_data))
+            self._open_steps.add(identity)
+        self._deferred.clear()
+        for identity in list(self._open_steps):
+            await self._publish(tool_result(identity, True, "The step did not finish"))
+        self._open_steps.clear()
+
+    async def _on_update(self, params: dict[str, Any]) -> None:
+        if self._loading or params.get("sessionId") != self._session_id:
+            return
+        update = params.get("update") or {}
+        kind = update.get("sessionUpdate")
+        content = update.get("content") if isinstance(update.get("content"), dict) else {}
+        if kind == "agent_message_chunk":
+            await self._stream.chunk("assistant", str(content.get("text") or ""))
+        elif kind == "agent_thought_chunk":
+            await self._stream.chunk("thinking", str(content.get("text") or ""))
+        elif kind == "tool_call":
+            await self._stream.close()
+            await self._on_tool_call(update)
+        elif kind == "tool_call_update":
+            await self._on_tool_update(update)
+        elif kind == "usage_update":
+            used, size = update.get("used"), update.get("size")
+            if isinstance(size, int) and size > 0:
+                self._context_limit = size
+            if isinstance(used, int):
+                await self._emit_context(used, self._context_limit)
+
+    async def _on_tool_call(self, update: dict[str, Any]) -> None:
+        identity = str(update.get("toolCallId") or uuid4().hex)
+        name, title, input_data = _gemini_acp_tool(update)
+        if update.get("kind") in ("edit", "delete", "move") and "old_string" not in input_data:
+            # The diff arrives with the result: the step is shown once it can render as a file edit.
+            self._deferred[identity] = (name, title, input_data)
+            return
+        if identity not in self._open_steps:
+            self._open_steps.add(identity)
+            await self._publish(tool_use(identity, name, title, input_data))
+
+    async def _on_tool_update(self, update: dict[str, Any]) -> None:
+        identity = str(update.get("toolCallId") or "")
+        status = update.get("status")
+        if status not in ("completed", "failed"):
+            return
+        deferred = self._deferred.pop(identity, None)
+        if deferred is not None:
+            name, title, input_data = deferred
+            refined = _gemini_acp_tool({**update, "kind": update.get("kind") or "edit",
+                                        "locations": update.get("locations") or [{"path": input_data.get("file_path")}]})
+            if "old_string" in refined[2]:
+                name, title, input_data = refined
+            await self._publish(tool_use(identity, name, title, input_data))
+        elif identity not in self._open_steps:
+            name, title, input_data = _gemini_acp_tool(update)
+            await self._publish(tool_use(identity, name, title, input_data))
+        self._open_steps.discard(identity)
+        await self._publish(tool_result(identity, status == "failed", _gemini_content_summary(update.get("content"))))
+
+    async def _on_request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Full access, like the other providers: a tool that still asks (an MCP server's own policy) is
+        allowed once; anything else the CLI asks of the client is refused."""
+        if method != "session/request_permission":
+            raise RuntimeError(f"Unsupported Gemini request {method}")
+        options = params.get("options") or []
+        if self._interrupted or self._closing:
+            return {"outcome": {"outcome": "cancelled"}}
+        chosen = next((option for option in options if option.get("kind") == "allow_once"), None) or next(
+            (option for option in options if str(option.get("kind", "")).startswith("allow")), None)
+        if chosen is None:
+            return {"outcome": {"outcome": "cancelled"}}
+        return {"outcome": {"outcome": "selected", "optionId": chosen["optionId"]}}
+
+    async def resolve(self, request_id: str, payload: dict[str, Any]) -> None:
+        raise ApiException.not_found("Unknown or already answered request")
+
+    async def set_configuration(self, config: AgentConfig) -> AgentConfig:
+        if config.model != self._config.model and self._acp is not None and self._session_id is not None:
+            await self._acp.request("session/set_model", {"sessionId": self._session_id, "modelId": config.model})
+        self._config = config
+        return config
+
+    async def interrupt(self) -> None:
+        self._interrupted = True
+        if self._acp is not None and self._session_id is not None and self._task and not self._task.done():
+            try:
+                await self._acp.notify("session/cancel", {"sessionId": self._session_id})
+            except Exception:
+                self._task.cancel()
+
+    async def recover(self) -> None:
+        """Relaunches the CLI and reloads the saved conversation. Serialized: a failed turn and a failed
+        delivery may both try at once."""
+        if self._closing:
+            raise ApiException.conflict("Gemini session is closed")
+        async with self._recovery_lock:
+            await self._prepare()
+            await self._connect()
+            self._interrupted = False
+
+    async def _recover_stream(self, error: Exception) -> None:
+        """A broken process loses only its running turn: relaunch with backoff, reloading the
+        conversation, and fail the session only when every attempt does."""
+        from mic_sessions.shared import gemini
+        LOG.error("The Gemini ACP process failed", exc_info=error)
+        cause = error.cause if isinstance(error, gemini.GeminiError) else "the agent stream broke"
+        await self._publish(agent_error(
+            f"{_INTERRUPTED_MESSAGE} ({cause}). Restoring the conversation; the workspace and its changes are kept."))
+        await self._close_open_steps()
+        attempts = get_settings().agent_recovery_attempts
+        for attempt in range(attempts):
+            if attempt:
+                await asyncio.sleep(2 ** attempt)
+            try:
+                await self.recover()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOG.warning("Gemini relaunch attempt %s/%s failed", attempt + 1, attempts, exc_info=True)
+                continue
+            await self._emit("agent.activity", {
+                "kind": "stream_recovered",
+                "description": "Reconnected and restored the conversation. Send a message to continue.",
+            })
+            await self._publish(turn_result("error", subtype="stream_interrupted"))
+            return
+        await self._publish(session_status(STATUS_FAILED, RECOVERABLE_DETAIL))
+
+    async def close(self) -> None:
+        self._closing = True
+        if self._task and not self._task.done():
+            self._task.cancel()
+            await asyncio.gather(self._task, return_exceptions=True)
+        if self._acp is not None:
+            await self._acp.close()
+            self._acp = None
+        await self._cleanup_home()
+
+
+class GeminiCliAgentRuntime(_GeminiRuntime):
+    """Gemini through its headless CLI (`gemini --prompt … --output-format stream-json`), without ACP.
+
+    Each turn is one process that prints its events and exits; the conversation continues across turns
+    with `--resume`, from the session log the CLI saved in the private home. Its stream carries no
+    thoughts and takes no images, so it declares neither. Nothing outlives a turn, so recovery only
+    re-validates the checkout: the next turn starts a fresh process on the saved conversation.
+    """
+
+    capabilities: ClassVar[AgentCapabilities] = GEMINI_CLI_CAPABILITIES
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._run_process: Any = None
+        self._session_id = str(uuid4())
+        # A conversation is resumable only once a turn saved model output; until then each turn starts anew.
+        self._resumable = False
+        self._open_steps: set[str] = set()
+
+    async def start(self) -> None:
+        await self._prepare()
+        await self._emit_context(0)
+        try:
+            await self._refresh_quota()
+        except Exception:
+            LOG.debug("Initial Gemini account usage is unavailable")
+
+    def _arguments(self) -> list[str]:
+        arguments = [self._binary(), "--prompt", "", "--output-format", "stream-json", "--approval-mode", "yolo",
+                     "--model", self._config.model]
+        if self._resumable:
+            return [*arguments, "--resume", self._session_id]
+        if self._session_id in self._session_ids:
+            # The previous attempt left an unresumable log under this id: start over under a new one.
+            self._session_id = str(uuid4())
+        self._session_ids.append(self._session_id)
+        return [*arguments, "--session-id", self._session_id]
+
+    async def send(self, text: str, images: Sequence[Image] = ()) -> None:
+        if self._closing or self._home is None:
+            raise ApiException.conflict("Gemini session is closed")
+        if self._task and not self._task.done():
+            raise ApiException.conflict("A Gemini turn is already running")
+        self._interrupted = False
+        await asyncio.to_thread(_validate_agent_workspace, self._workspace, self._branch)
+        self._task = asyncio.create_task(self._run(text))
+        await asyncio.sleep(0)
+
+    async def _run(self, text: str) -> None:
+        from mic_sessions.shared import gemini
+        stream = _GeminiStream(self._publish)
+        terminal, usage, produced = "error", None, False
+        started = time.monotonic()
+        run = None
+        try:
+            run = gemini.Headless(self._arguments(), cwd=self._workspace, env=self._process_env())
+            self._run_process = run
+            async for event in run.events(text):
+                kind = event.get("type")
+                if kind == "message" and event.get("role") == "assistant":
+                    produced = True
+                    await stream.chunk("assistant", str(event.get("content") or ""))
+                elif kind == "tool_use":
+                    produced = True
+                    await stream.close()
+                    identity = str(event.get("tool_id") or uuid4().hex)
+                    args = event.get("parameters") if isinstance(event.get("parameters"), dict) else {}
+                    name, input_data = _gemini_tool(str(event.get("tool_name") or ""), args)
+                    self._open_steps.add(identity)
+                    await self._publish(tool_use(identity, name, _tool_title(name, input_data), input_data))
+                elif kind == "tool_result":
+                    identity = str(event.get("tool_id") or "")
+                    failed = event.get("status") == "error"
+                    error = event.get("error") if isinstance(event.get("error"), dict) else {}
+                    self._open_steps.discard(identity)
+                    await self._publish(tool_result(identity, failed, _result_summary(
+                        event.get("output") or error.get("message") or ("Failed" if failed else "Done"))))
+                elif kind == "error" and event.get("severity") == "error":
+                    await self._publish(agent_error(_result_summary(str(event.get("message") or "Gemini reported an error"))))
+                elif kind == "result":
+                    await stream.close()
+                    stats = event.get("stats") if isinstance(event.get("stats"), dict) else {}
+                    usage = {"input_tokens": stats.get("input_tokens"), "output_tokens": stats.get("output_tokens"),
+                             "cache_read_input_tokens": stats.get("cached")} if stats else None
+                    if event.get("status") == "success":
+                        terminal = "completed"
+                    elif not self._interrupted:
+                        error = event.get("error") if isinstance(event.get("error"), dict) else {}
+                        await self._publish(agent_error(_gemini_api_message(str(error.get("message") or ""))))
+        except asyncio.CancelledError:
+            terminal = "interrupted"
+            if run is not None:
+                await run.close()
+            raise
+        except gemini.GeminiError as error:
+            if not self._interrupted:
+                await self._publish(agent_error(_gemini_failure(error)))
+        except Exception:
+            LOG.exception("The Gemini CLI turn failed")
+            await self._publish(agent_error("Gemini could not complete the turn. Check your account and try again."))
+        finally:
+            self._run_process = None
+            await stream.close()
+            for identity in list(self._open_steps):
+                await self._publish(tool_result(identity, True, "The step did not finish"))
+            self._open_steps.clear()
+            self._resumable = self._resumable or produced
+            if not self._closing:
+                await self._publish(turn_result("interrupted" if self._interrupted else terminal,
+                                               duration_ms=int((time.monotonic() - started) * 1000), usage=usage))
+        await self._context_from_log(self._session_id)
+        try:
+            await self._refresh_quota()
+        except Exception:
+            LOG.debug("Gemini quota is unavailable")
+
+    async def resolve(self, request_id: str, payload: dict[str, Any]) -> None:
+        raise ApiException.not_found("Unknown or already answered request")
+
+    async def interrupt(self) -> None:
+        self._interrupted = True
+        run = self._run_process
+        if run is not None:
+            await run.interrupt()
+        elif self._task and not self._task.done():
+            self._task.cancel()
+
+    async def recover(self) -> None:
+        if self._closing:
+            raise ApiException.conflict("Gemini session is closed")
+        await self._prepare()
+        self._interrupted = False
+
+    async def close(self) -> None:
+        self._closing = True
+        if self._run_process is not None:
+            await self._run_process.close()
+        if self._task and not self._task.done():
+            self._task.cancel()
+            await asyncio.gather(self._task, return_exceptions=True)
+        await self._cleanup_home()
+
+
+def _gemini_api_message(message: str) -> str:
+    """A user-facing reason for a failed Gemini request: the API's own wording is buried in JSON."""
+    lowered = message.lower()
+    if "api key not valid" in lowered or "api_key_invalid" in lowered:
+        return "Gemini rejected the API key. Check it in your agent accounts."
+    if "429" in message or "resource_exhausted" in lowered or "quota" in lowered:
+        return "Gemini reports that this account reached its usage limit. Try again later or switch model."
+    if "401" in message or "403" in message or "unauthenticated" in lowered or "permission_denied" in lowered:
+        return "Gemini rejected the account. Reconnect it in your agent accounts."
+    return "Gemini could not complete the turn. Retry, or check your account and selected model."
+
+
+def _gemini_failure(error: Exception) -> str:
+    from mic_sessions.shared import gemini
+    if isinstance(error, gemini.GeminiError) and error.code is not None:
+        return _gemini_api_message(error.detail)
+    return "Gemini could not complete the turn. Check your account connection and try again."
+
+
 @dataclass(frozen=True)
 class AdapterDescriptor:
     """One implementation of a provider: the integration technology behind the same contract."""
@@ -2797,6 +3488,12 @@ PROVIDERS: dict[str, ProviderDescriptor] = {
     "claude": ProviderDescriptor("claude", "Claude", (
         AdapterDescriptor("sdk", "Claude SDK", ClaudeAgentRuntime),
         AdapterDescriptor("cli", "Claude CLI", ClaudeCliAgentRuntime),
+    )),
+    # Google ships no agent SDK: both adapters drive the pinned Gemini CLI, through ACP (its programmatic
+    # interface, the default) or headless stream-json.
+    "gemini": ProviderDescriptor("gemini", "Gemini", (
+        AdapterDescriptor("acp", "Gemini ACP", GeminiAcpAgentRuntime),
+        AdapterDescriptor("cli", "Gemini CLI", GeminiCliAgentRuntime),
     )),
 }
 

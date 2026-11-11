@@ -11,6 +11,7 @@ driven by coding agents, on desktop and mobile.
 
 ![Claude Code](https://img.shields.io/badge/Claude_Code-supported-d97757?style=flat-square)
 ![Codex](https://img.shields.io/badge/Codex-supported-10a37f?style=flat-square)
+![Gemini](https://img.shields.io/badge/Gemini-supported-4285f4?style=flat-square)
 ![Docker](https://img.shields.io/badge/Docker-isolated_previews-2496ed?style=flat-square&logo=docker&logoColor=white)
 ![Multi-tenant](https://img.shields.io/badge/multi--tenant-secure-111111?style=flat-square)
 ![Responsive](https://img.shields.io/badge/desktop_%26_mobile-ready-276ef1?style=flat-square)
@@ -35,7 +36,7 @@ sync in real time.
 
 | | Feature | Description |
 | :---: | --- | --- |
-| 💬 | **Parallel agent sessions** | Independent chats per project with Claude Code or Codex, each on its own branch and repository copy. |
+| 💬 | **Parallel agent sessions** | Independent chats per project with Claude Code, Codex or Gemini, each on its own branch and repository copy. |
 | 👀 | **Live changes** | Follow what the agent does and every file it touches, as it happens. |
 | 📊 | **Usage insights** | Context size, session and weekly limits and more, per session and per account. |
 | 🎛️ | **Models & accounts** | Pick model and thinking effort; connect several provider accounts, even of the same provider. |
@@ -51,7 +52,7 @@ sync in real time.
 
 ## 🧭 How it works
 
-1. **Connect**: sign in with Google and link GitHub, Claude and Codex accounts.
+1. **Connect**: sign in with Google and link GitHub, Claude, Codex and Gemini accounts.
 2. **Add a project**: any public or private repository you can access.
 3. **Build**: open sessions, chat with agents, watch changes and preview each feature live.
 4. **Merge**: bring finished work into the main branch, conflicts handled by the agent.

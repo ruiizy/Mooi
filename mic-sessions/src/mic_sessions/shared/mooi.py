@@ -53,6 +53,8 @@ class Credential:
     session_effort: str | None = None
     # The platform's default adapter for this provider; None is the provider's first one.
     session_adapter: str | None = None
+    # Only for a provider that never rotates it (Google): its CLI renews the access token mid-turn.
+    refresh_token: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -416,6 +418,7 @@ async def fetch_agent_credential(caller: Caller, connection_id: str) -> Credenti
         session_model=body.get("sessionModel"),
         session_effort=body.get("sessionEffort"),
         session_adapter=body.get("sessionAdapter"),
+        refresh_token=body.get("refreshToken"),
         save=save if body["provider"] == "codex" else None,
         expires_at=datetime.fromisoformat(expires_at) if expires_at else None,
     )

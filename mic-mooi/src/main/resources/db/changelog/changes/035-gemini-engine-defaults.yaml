@@ -1,0 +1,11 @@
+databaseChangeLog:
+  - changeSet:
+      id: 035-gemini-engine-defaults
+      author: mooi
+      comment: Gemini joins Claude and Codex as an agent provider with its own session defaults
+      changes:
+        - sql:
+            sql: INSERT INTO agent_engine_defaults (provider) VALUES ('gemini') ON CONFLICT DO NOTHING
+      rollback:
+        - sql:
+            sql: DELETE FROM agent_engine_defaults WHERE provider = 'gemini'

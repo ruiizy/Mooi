@@ -30,6 +30,8 @@ export const SessionPage = () => {
     busy,
     actionError,
     send,
+    queue,
+    unqueue,
     interrupt,
     recover,
     compact,
@@ -128,6 +130,8 @@ export const SessionPage = () => {
               modelError={modelError}
               actionError={actionError}
               onSend={send}
+              onQueue={queue}
+              onUnqueue={unqueue}
               onInterrupt={interrupt}
               onRecover={recover}
               onCompact={compact}

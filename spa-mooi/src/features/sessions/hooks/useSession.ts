@@ -9,8 +9,10 @@ import {
   fetchSession,
   fetchSessionProvider,
   interruptSession,
+  queueSessionMessage,
   recoverSession,
   sendSessionMessage,
+  unqueueSessionMessage,
   updateSessionConfiguration,
 } from '@/features/sessions/api/sessionsApi';
 import { seedSessionImage } from '@/features/sessions/lib/sessionImageCache';
@@ -26,6 +28,9 @@ interface UseSession {
   busy: boolean;
   actionError: string | null;
   send: (text: string, images?: PreparedImage[]) => Promise<boolean>;
+  /** Queues a message for when the agent finishes; the server sends it at once if the agent is free. */
+  queue: (text: string, images?: PreparedImage[]) => Promise<boolean>;
+  unqueue: (messageId: string) => Promise<boolean>;
   interrupt: () => Promise<boolean>;
   recover: () => Promise<boolean>;
   compact: (instructions?: string) => Promise<boolean>;
@@ -180,6 +185,28 @@ export const useSession = (sessionId: string | undefined): UseSession => {
     [sessionId, runAction],
   );
 
+  const queue = useCallback(
+    (text: string, images: PreparedImage[] = []) => {
+      const current = useSessionsStore.getState().sessions.find((candidate) => candidate.id === sessionId);
+      if (!sessionId || !current || current.status === 'closed' || current.status === 'failed' || current.status === 'provisioning') {
+        return Promise.resolve(false);
+      }
+      return runAction(async () => {
+        const queued = await queueSessionMessage(sessionId, text, images.map((image) => image.upload));
+        // Shown from the sender's local copies, in the queue and once delivered, never downloaded.
+        queued.images.forEach((stored, index) => {
+          if (images[index]) seedSessionImage(sessionId, stored.id, images[index].blob);
+        });
+      });
+    },
+    [sessionId, runAction],
+  );
+
+  const unqueue = useCallback(
+    (messageId: string) => (sessionId ? runAction(() => unqueueSessionMessage(sessionId, messageId)) : Promise.resolve(false)),
+    [sessionId, runAction],
+  );
+
   const interrupt = useCallback(
     () => (sessionId ? runAction(() => interruptSession(sessionId)) : Promise.resolve(false)),
     [sessionId, runAction],
@@ -244,6 +271,8 @@ export const useSession = (sessionId: string | undefined): UseSession => {
     busy,
     actionError,
     send,
+    queue,
+    unqueue,
     interrupt,
     recover,
     compact,

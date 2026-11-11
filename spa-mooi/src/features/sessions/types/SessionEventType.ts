@@ -6,6 +6,7 @@ export type SessionEventType =
   | 'session.status'
   | 'session.configuration'
   | 'session.usage'
+  | 'session.queue'
   | 'session.sync'
   | 'history.reset'
   | 'session.cleared'

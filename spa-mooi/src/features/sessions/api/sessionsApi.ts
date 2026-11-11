@@ -11,6 +11,7 @@ import type { SessionFileContent } from '@/features/sessions/types/SessionFileCo
 import type { SessionFiles } from '@/features/sessions/types/SessionFiles';
 import type { ImageUpload } from '@/features/sessions/types/ImageUpload';
 import type { MergeResult } from '@/features/sessions/types/MergeResult';
+import type { QueuedMessage } from '@/features/sessions/types/QueuedMessage';
 import type { SendMessageResponse } from '@/features/sessions/types/SendMessageResponse';
 import type { Session } from '@/features/sessions/types/Session';
 import type { SessionsResponse } from '@/features/sessions/types/SessionsResponse';
@@ -22,6 +23,9 @@ const sessionsPath = (projectId?: string) =>
 const workspacesPath = (projectId: string) => `/sessions/workspaces?projectId=${encodeURIComponent(projectId)}`;
 const sessionPath = (sessionId: string) => `/sessions/${sessionId}`;
 const messagesPath = (sessionId: string) => `/sessions/${sessionId}/messages`;
+const queuePath = (sessionId: string) => `/sessions/${sessionId}/queue`;
+const queuedMessagePath = (sessionId: string, messageId: string) =>
+  `/sessions/${sessionId}/queue/${encodeURIComponent(messageId)}`;
 const imagePath = (sessionId: string, imageId: string) => `/sessions/${sessionId}/images/${imageId}`;
 const configurationPath = (sessionId: string) => `/sessions/${sessionId}/configuration`;
 const interruptPath = (sessionId: string) => `/sessions/${sessionId}/interrupt`;
@@ -97,6 +101,26 @@ export const sendSessionMessage = async (sessionId: string, text: string, images
   }
 
   return (await response.json()) as SendMessageResponse;
+};
+
+/** Queues a message for when the agent finishes its turn; the server sends it at once when the agent is free. */
+export const queueSessionMessage = async (sessionId: string, text: string, images: ImageUpload[] = []): Promise<QueuedMessage> => {
+  const response = await sessionsFetch(queuePath(sessionId), {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(images.length ? { text, images } : { text }),
+  });
+
+  if (!response.ok) {
+    throw new Error(await apiErrorMessage(response, 'Could not queue this message.'));
+  }
+
+  return (await response.json()) as QueuedMessage;
+};
+
+export const unqueueSessionMessage = async (sessionId: string, messageId: string): Promise<void> => {
+  const response = await sessionsFetch(queuedMessagePath(sessionId, messageId), { method: 'DELETE' });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, 'Could not remove this queued message.'));
 };
 
 export const fetchSessionImage = async (sessionId: string, imageId: string): Promise<Blob> => {

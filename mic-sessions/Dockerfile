@@ -1,7 +1,7 @@
 # Production image of mic-sessions: the agent runtime host.
 #
-# Agents (Claude Code and Codex, both bundled by their pinned official SDKs, plus a standalone pinned
-# Claude Code CLI for the Claude CLI adapter) run in full access
+# Agents (Claude Code and Codex, both bundled by their pinned official SDKs, a standalone pinned
+# Claude Code CLI for the Claude CLI adapter and the pinned Gemini CLI for both Gemini adapters) run in full access
 # inside this container, so it carries the toolchains a session checkout usually needs: Git, Docker
 # CLI with Compose and Buildx (deployments drive the host engine through its mounted socket), Node,
 # Bun, Python with uv, Java 25 and the usual shell utilities (ssh, rsync, curl, jq, make, ripgrep).
@@ -64,6 +64,13 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
 ARG CLAUDE_CODE_VERSION=2.1.310
 RUN npm install -g --no-audit --no-fund "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
     && claude --version \
+    && rm -rf /root/.npm
+
+# Gemini CLI driven by both Gemini adapters (AGENT_GEMINI_CLI): ACP (`--acp`) and headless stream-json.
+# Pinned: its ACP and session log formats are what the adapters and the Trace parser read; never auto-updated.
+ARG GEMINI_CLI_VERSION=0.68.0
+RUN npm install -g --no-audit --no-fund "@google/gemini-cli@${GEMINI_CLI_VERSION}" \
+    && gemini --version \
     && rm -rf /root/.npm
 
 # Install once at image build; agent turns never download packages or browsers.

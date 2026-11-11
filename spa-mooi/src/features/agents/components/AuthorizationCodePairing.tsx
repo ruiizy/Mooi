@@ -1,22 +1,25 @@
 import { useEffect, useState } from 'react';
 import { ExternalLink, KeyRound, LoaderCircle } from 'lucide-react';
 import { completeAgentAuthorization, startAgentAuthorization } from '@/features/agents/api/agentsApi';
+import type { AgentProviderCopy } from '@/features/agents/lib/agentProviderCopy';
 import type { AgentAuthorizationResponse } from '@/features/agents/types/AgentAuthorizationResponse';
 import { Button } from '@/shared/components/Button';
 import { useAgentsStore } from '@/stores/agentsStore';
 
-interface ClaudePairingProps {
+interface AuthorizationCodePairingProps {
   provider: string;
   name: string;
+  copy: AgentProviderCopy['signIn'];
   onConnected: () => void;
 }
 
 /**
- * The Claude Code sign-in: the player authorizes on Anthropic's own page, which then shows a code to
- * paste back here (Claude Code's client only redirects to that page). The code is redeemed by the API
- * with the state it signed, so this component never handles a token.
+ * A provider sign-in that ends on the provider's own page showing a code to paste back here: the
+ * Claude Code sign-in (Anthropic's page) and the Gemini CLI sign-in (Google's Code Assist page), since
+ * those clients only redirect there. The code is redeemed by the API with the state it signed, so this
+ * component never handles a token.
  */
-export const ClaudePairing = ({ provider, name, onConnected }: ClaudePairingProps) => {
+export const AuthorizationCodePairing = ({ provider, name, copy, onConnected }: AuthorizationCodePairingProps) => {
   const [attempt, setAttempt] = useState<AgentAuthorizationResponse | null>(null);
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
@@ -51,10 +54,10 @@ export const ClaudePairing = ({ provider, name, onConnected }: ClaudePairingProp
   }
 
   return <div className="flex flex-col gap-4">
-    <p className="text-sm text-ink-muted">Sign in with your Claude account and authorize Claude Code. Then copy the code Anthropic shows and paste it here.</p>
+    <p className="text-sm text-ink-muted">{copy.instructions}</p>
     <a href={attempt.authorizeUrl} target="_blank" rel="noopener noreferrer"
       className="flex items-center justify-center gap-2 rounded-xl bg-brand px-4 py-3 text-sm font-semibold text-white">
-      Continue with Claude <ExternalLink className="size-4" />
+      {copy.action} <ExternalLink className="size-4" />
     </a>
     <label className="flex flex-col gap-2">
       <span className="text-xs font-semibold text-ink-muted">Authorization code</span>
@@ -70,6 +73,6 @@ export const ClaudePairing = ({ provider, name, onConnected }: ClaudePairingProp
       {busy ? 'Connecting…' : 'Connect account'}
     </Button>
     {error && <p role="alert" className="text-sm text-danger">{error}</p>}
-    <p className="text-xs text-ink-subtle">The code works once and expires after a few minutes.</p>
+    <p className="text-xs text-ink-subtle">{copy.codeHint}</p>
   </div>;
 };
