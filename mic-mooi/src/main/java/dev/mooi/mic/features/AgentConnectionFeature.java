@@ -45,14 +45,14 @@ import lombok.Setter;
  * Feature: agent-provider credentials linked to a player.
  *
  * <p>A connection hands an agent-provider credential (a Claude OAuth access token, a Codex
- * {@code auth.json}, a Google access token or a Gemini API key) to {@code mic-sessions} on request; the
- * browser never holds it. Claude is linked by the Claude Code sign-in (OAuth2 + PKCE, the code pasted back
- * from Anthropic's page), whose short-lived token this feature renews: it is the only holder of the
- * refresh token, so concurrent sessions of one account never race to rotate it. Tokens pasted from
- * {@code claude setup-token} keep working. Gemini is linked by the Gemini CLI sign-in (Google OAuth2 +
- * PKCE, the code pasted back from Google's Code Assist page) or by a pasted Gemini API key; Google never
- * rotates its refresh token, so it is shared with the session runtime for in-turn renewals. Every mode is
- * recorded in the same table, distinguished only by {@link Agents.Mode}.
+ * {@code auth.json} or an Antigravity credential bundle) to {@code mic-sessions} on request; the browser
+ * never holds it. Claude is linked by the Claude Code sign-in (OAuth2 + PKCE, the code pasted back from
+ * Anthropic's page), whose short-lived token this feature renews: it is the only holder of the refresh
+ * token, so concurrent sessions of one account never race to rotate it. Tokens pasted from {@code claude
+ * setup-token} keep working. Codex and Antigravity are signed in by their own binaries inside {@code
+ * mic-sessions}, which posts the result here ({@link Agents.Mode#agentOwned() agent-owned} modes); the
+ * binary renews it in-session and the session writes the renewed copy back, so this feature never renews
+ * them. Every mode is recorded in the same table, distinguished only by {@link Agents.Mode}.
  *
  * <p>Self-contained by architecture: API, application logic, persistence and contracts live in this
  * single file and may only import transversal aspects from {@code shared}.
@@ -146,9 +146,18 @@ public class AgentConnectionFeature {
     @PostMapping("/me/agents/codex/device-connection")
     @Auth.Authenticated
     @Auth.ServiceCall
-    public AgentConnectionPayload connectDevice(@Valid @RequestBody DeviceConnectRequest request,
+    public AgentConnectionPayload connectDevice(@Valid @RequestBody AgentOwnedConnectRequest request,
                                                 Auth.Principal principal) {
-        return agentConnectionService.connectDevice(principal.player().id(), request);
+        return agentConnectionService.connectAgentOwned(principal.player().id(), "codex", request);
+    }
+
+    /** The bundle {@code agy acp --login} wrote in a temporary home of {@code mic-sessions}, for the caller. */
+    @PostMapping("/me/agents/antigravity/agent-connection")
+    @Auth.Authenticated
+    @Auth.ServiceCall
+    public AgentConnectionPayload connectAntigravity(@Valid @RequestBody AgentOwnedConnectRequest request,
+                                                     Auth.Principal principal) {
+        return agentConnectionService.connectAgentOwned(principal.player().id(), "antigravity", request);
     }
 
     @PutMapping("/me/agents/{provider}/credential")
@@ -181,13 +190,13 @@ public class AgentConnectionFeature {
         private final Agents.Settings settings;
         private final Agents.StateCodec stateCodec;
         private final Agents.OAuthClient oauthClient;
-        private final Agents.GoogleOAuthClient googleOAuthClient;
         private final Crypto.SecretBox secretBox;
         private final Clock clock;
 
         private static final Pattern ADAPTER_ID = Pattern.compile("^[a-z0-9][a-z0-9_-]{0,31}$");
-        /** An API key is one printable token: no spaces, no control characters, bounded. */
-        private static final Pattern API_KEY = Pattern.compile("^[\\x21-\\x7E]{8,512}$");
+        /** A Codex {@code auth.json}: a few kilobytes of JSON. */
+        private static final int MAX_DEVICE_OAUTH_LENGTH = 65536;
+        private static final int MAX_ACCOUNT_LABEL_LENGTH = 255;
 
         /** One grant, whichever mode produced it. Fields absent for a mode are simply {@code null}. */
         private record Grant(String accessToken, OffsetDateTime accessTokenExpiresAt, String refreshToken,
@@ -251,9 +260,7 @@ public class AgentConnectionFeature {
             if (authorizationCode.isEmpty()) {
                 throw Agents.AgentsException.invalidToken();
             }
-            Agents.Tokens grant = agentProvider.dialect() == Agents.Dialect.GOOGLE
-                    ? googleOAuthClient.exchangeCode(agentProvider, authorizationCode, claims.codeVerifier())
-                    : oauthClient.exchangeCode(agentProvider, authorizationCode, state, claims.codeVerifier());
+            Agents.Tokens grant = oauthClient.exchangeCode(agentProvider, authorizationCode, state, claims.codeVerifier());
             AgentConnection saved = create(playerId, agentProvider, Agents.Mode.OAUTH, toGrant(grant), name);
             Agents.LOG.info("Player {} linked agent provider {} ({})", playerId, agentProvider.id(),
                     Agents.Mode.OAUTH.wire());
@@ -261,12 +268,12 @@ public class AgentConnectionFeature {
         }
 
         /**
-         * Hands out a usable credential to another internal service. For {@code setup_token} and
-         * {@code api_key} the stored token is handed out as is — it never expires and has no refresh token.
-         * For {@code oauth} it is renewed first when it is within the provider's refresh margin of expiring,
-         * so a caller is never handed a credential that dies mid-flight. A provider that never rotates its
-         * refresh token ({@link Agents.Provider#sharesRefreshToken()}) also hands it out, so its runtime can
-         * renew the access token itself during a turn longer than the token's life.
+         * Hands out a usable credential to another internal service. For {@code setup_token} and the
+         * agent-owned modes ({@code device_oauth}, {@code agent_oauth}) the stored token is handed out as is:
+         * it never expires here and has no refresh token this platform could use, the provider's binary
+         * renews it in-session. For {@code oauth} it is renewed first when it is within the refresh margin of
+         * expiring, so a caller is never handed a credential that dies mid-flight. A refresh token is never
+         * handed out.
          *
          * <p>The row is read under a write lock, held for this short transaction: the refresh token is
          * single-use, so two sessions asking at once must not both spend it — the second one simply
@@ -281,18 +288,15 @@ public class AgentConnectionFeature {
                 connection = ensureFreshToken(connection, agentProvider);
             }
             EngineDefaults defaults = engineDefaultsRepository.findById(agentProvider.id()).orElseThrow();
-            String refreshToken = agentProvider.sharesRefreshToken()
-                    && Agents.Mode.fromWire(connection.getMode()) == Agents.Mode.OAUTH
-                    ? secretBox.decrypt(connection.getRefreshToken()) : null;
             return new CredentialPayload(agentProvider.id(), connection.getMode(),
                     secretBox.decrypt(connection.getAccessToken()), connection.getAccessTokenExpiresAt(),
                     connection.getCredentialId(), defaults.getSessionModel(), defaults.getSessionEffort(),
-                    defaults.getSessionAdapter(), refreshToken);
+                    defaults.getSessionAdapter());
         }
 
         /**
-         * Records a pasted credential: a {@code claude setup-token} token or a Gemini API key, as the
-         * provider's {@link Agents.Provider#pastedMode()}. Not validated beyond its shape: token formats
+         * Records a pasted credential: a {@code claude setup-token} token, as the provider's {@link
+         * Agents.Provider#pastedMode()}. Not validated beyond its shape: token formats
          * are the provider's to change, and a wrong credential already fails loudly, and safely, the first
          * time a session tries to use it.
          */
@@ -301,7 +305,7 @@ public class AgentConnectionFeature {
             Agents.Provider agentProvider = settings.find(provider).orElseThrow(Agents.AgentsException::unknownProvider);
             Agents.Mode mode = agentProvider.pastedMode().orElseThrow(Agents.AgentsException::invalidToken);
             String cleaned = token == null ? "" : token.strip();
-            if (cleaned.isEmpty() || mode == Agents.Mode.API_KEY && !API_KEY.matcher(cleaned).matches()) {
+            if (cleaned.isEmpty()) {
                 throw Agents.AgentsException.invalidToken();
             }
             AgentConnection saved = create(playerId, agentProvider, mode, new Grant(cleaned, null, null, null, null), name);
@@ -309,25 +313,48 @@ public class AgentConnectionFeature {
             return toPayload(saved);
         }
 
+        /**
+         * Records what a provider's own binary signed in with inside {@code mic-sessions} (a Codex {@code
+         * auth.json}, an Antigravity bundle), always for the caller, as the provider's agent-owned mode. Only
+         * the shape is checked; the token never reaches a log.
+         */
         @Transactional
-        public AgentConnectionPayload connectDevice(UUID playerId, DeviceConnectRequest request) {
-            Agents.Provider provider = settings.find("codex").orElseThrow(Agents.AgentsException::unknownProvider);
-            if (request.token().length() > 65536 || request.accountLabel() != null && request.accountLabel().length() > 255) {
+        public AgentConnectionPayload connectAgentOwned(UUID playerId, String provider, AgentOwnedConnectRequest request) {
+            Agents.Provider agentProvider = settings.find(provider).orElseThrow(Agents.AgentsException::unknownProvider);
+            Agents.Mode mode = agentProvider.agentOwnedMode().orElseThrow(Agents.AgentsException::unknownProvider);
+            String accountLabel = request.accountLabel() == null || request.accountLabel().isBlank()
+                    ? null : request.accountLabel().strip();
+            if (!validAgentOwned(mode, request.token())
+                    || accountLabel != null && accountLabel.length() > MAX_ACCOUNT_LABEL_LENGTH) {
                 throw Agents.AgentsException.invalidToken();
             }
-            return toPayload(create(playerId, provider, Agents.Mode.DEVICE_OAUTH,
-                    new Grant(request.token(), null, null, null, request.accountLabel()), request.name()));
+            AgentConnection saved = create(playerId, agentProvider, mode,
+                    new Grant(request.token(), null, null, null, accountLabel), request.name());
+            Agents.LOG.info("Player {} linked agent provider {} ({})", playerId, agentProvider.id(), mode.wire());
+            return toPayload(saved);
         }
 
+        /**
+         * Writes back the copy a session's binary renewed. The connection must still be the caller's, of this
+         * provider and mode, with the credential id the session was handed: a relinked or dropped account
+         * answers 409, never overwrites another link.
+         */
         @Transactional
         public void refreshCredential(UUID playerId, String provider, RefreshCredentialRequest request) {
-            if (!provider.equals("codex") || request.token().length() > 65536) {
-                throw Agents.AgentsException.reauthorize();
+            Agents.Mode mode = settings.find(provider).flatMap(Agents.Provider::agentOwnedMode)
+                    .orElseThrow(Agents.AgentsException::reauthorize);
+            if (!validAgentOwned(mode, request.token())) {
+                throw Agents.AgentsException.invalidToken();
             }
-            if (agentConnectionRepository.refreshCodex(playerId, request.connectionId(),
+            if (agentConnectionRepository.refreshAgentOwned(playerId, provider, mode.wire(), request.connectionId(),
                     secretBox.encrypt(request.token())) != 1) {
                 throw Agents.AgentsException.reauthorize();
             }
+        }
+
+        private static boolean validAgentOwned(Agents.Mode mode, String token) {
+            return mode == Agents.Mode.AGENT_OAUTH ? Agents.AgentOAuthBundle.isValid(token)
+                    : token != null && !token.isBlank() && token.length() <= MAX_DEVICE_OAUTH_LENGTH;
         }
 
         /** Idempotent: disconnecting an account that was never linked is not an error. */
@@ -444,9 +471,7 @@ public class AgentConnectionFeature {
          */
         private AgentConnection ensureFreshToken(AgentConnection connection, Agents.Provider provider) {
             OffsetDateTime expiresAt = connection.getAccessTokenExpiresAt();
-            java.time.Duration skew = provider.tokenRefreshSkew() != null ? provider.tokenRefreshSkew()
-                    : settings.getTokenRefreshSkew();
-            if (expiresAt == null || expiresAt.isAfter(OffsetDateTime.now(clock).plus(skew))) {
+            if (expiresAt == null || expiresAt.isAfter(OffsetDateTime.now(clock).plus(settings.getTokenRefreshSkew()))) {
                 return connection;
             }
             String refreshToken = secretBox.decrypt(connection.getRefreshToken());
@@ -457,9 +482,7 @@ public class AgentConnectionFeature {
                 throw Agents.AgentsException.reauthorize();
             }
             try {
-                Agents.Tokens renewed = provider.dialect() == Agents.Dialect.GOOGLE
-                        ? googleOAuthClient.refresh(provider, refreshToken)
-                        : oauthClient.refresh(provider, refreshToken);
+                Agents.Tokens renewed = oauthClient.refresh(provider, refreshToken);
                 // Some providers omit fields on renewal rather than rotating them: keep what was there.
                 Grant grant = new Grant(renewed.accessToken(), renewed.accessTokenExpiresAt(),
                         renewed.refreshToken() != null ? renewed.refreshToken() : refreshToken,
@@ -619,9 +642,9 @@ public class AgentConnectionFeature {
         // The identity check and update must be atomic with a concurrent disconnect/relink.
         @Modifying
         @Query("update AgentConnection c set c.accessToken = :token "
-                + "where c.playerId = :playerId and c.provider = 'codex' "
-                + "and c.mode = 'device_oauth' and c.credentialId = :connectionId")
-        int refreshCodex(UUID playerId, UUID connectionId, String token);
+                + "where c.playerId = :playerId and c.provider = :provider "
+                + "and c.mode = :mode and c.credentialId = :connectionId")
+        int refreshAgentOwned(UUID playerId, String provider, String mode, UUID connectionId, String token);
     }
 
     // --- contracts ---
@@ -646,12 +669,11 @@ public class AgentConnectionFeature {
 
     /**
      * A usable credential, handed only to another internal service. The single place, across every
-     * payload in this feature, where a raw token is ever serialized. {@code refreshToken} is set only for
-     * a provider that never rotates it (see {@link Agents.Provider#sharesRefreshToken()}).
+     * payload in this feature, where a raw token is ever serialized. {@code connectionId} is the
+     * connection's credential id, the one a write-back must name.
      */
     public record CredentialPayload(String provider, String mode, String token, OffsetDateTime expiresAt, UUID connectionId,
-                                    String sessionModel, String sessionEffort, String sessionAdapter,
-                                    String refreshToken) {
+                                    String sessionModel, String sessionEffort, String sessionAdapter) {
     }
 
     /** One provider this application knows how to link, and whether OAuth is actually usable for it. */
@@ -667,7 +689,8 @@ public class AgentConnectionFeature {
     public record OauthConnectRequest(@NotBlank String code, @NotBlank String state, @NotBlank String name) {
     }
 
-    public record DeviceConnectRequest(@NotBlank String token, String accountLabel, @NotBlank String name) { }
+    /** A credential a provider's own binary produced; {@code accountLabel} is the account e-mail it reported. */
+    public record AgentOwnedConnectRequest(@NotBlank String token, String accountLabel, @NotBlank String name) { }
 
     public record RefreshCredentialRequest(@NotBlank String token,
             @jakarta.validation.constraints.NotNull UUID connectionId) { }

@@ -15,8 +15,7 @@ interface AuthorizationCodePairingProps {
 
 /**
  * A provider sign-in that ends on the provider's own page showing a code to paste back here: the
- * Claude Code sign-in (Anthropic's page) and the Gemini CLI sign-in (Google's Code Assist page), since
- * those clients only redirect there. The code is redeemed by the API with the state it signed, so this
+ * Claude Code sign-in (Anthropic's page), since that client only redirects there. The code is redeemed by the API with the state it signed, so this
  * component never handles a token.
  */
 export const AuthorizationCodePairing = ({ provider, name, copy, onConnected }: AuthorizationCodePairingProps) => {

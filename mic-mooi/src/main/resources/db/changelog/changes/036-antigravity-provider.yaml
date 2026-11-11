@@ -1,0 +1,25 @@
+databaseChangeLog:
+  - changeSet:
+      id: 036-antigravity-provider
+      author: mooi
+      comment: >-
+        Antigravity replaces Gemini as an agent provider. Gemini links (Google OAuth and API key) cannot drive
+        the Antigravity CLI, so they are dropped and players sign in again; the session defaults restart empty
+        on the Antigravity CLI adapter.
+      changes:
+        - sql:
+            sql: |
+              DELETE FROM agent_account_preferences
+              WHERE connection_id IN (SELECT id FROM agent_connections WHERE provider = 'gemini');
+              DELETE FROM agent_connections WHERE provider = 'gemini';
+              DELETE FROM agent_engine_defaults WHERE provider = 'gemini';
+              INSERT INTO agent_engine_defaults (provider, session_adapter) VALUES ('antigravity', 'cli')
+              ON CONFLICT DO NOTHING;
+      rollback:
+        - sql:
+            sql: |
+              DELETE FROM agent_account_preferences
+              WHERE connection_id IN (SELECT id FROM agent_connections WHERE provider = 'antigravity');
+              DELETE FROM agent_connections WHERE provider = 'antigravity';
+              DELETE FROM agent_engine_defaults WHERE provider = 'antigravity';
+              INSERT INTO agent_engine_defaults (provider) VALUES ('gemini') ON CONFLICT DO NOTHING;

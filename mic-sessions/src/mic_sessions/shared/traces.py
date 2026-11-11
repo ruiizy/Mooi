@@ -2,8 +2,9 @@
 
 Each provider already writes a complete, timestamped log of its conversation: Claude Code a JSONL
 transcript per conversation under its config directory (plus one per sub-agent), Codex one rollout
-JSONL per thread, the Gemini CLI one session JSONL per conversation (plus one per sub-agent beside it). This module turns those native logs into one provider-neutral trace, the shape
-observability platforms use: prompts (one user request each), turns (one agent-loop iteration: a model
+JSONL per thread, the Antigravity CLI Mooi's own record of the frames it printed (enriched by its brain
+transcripts: thinking, delegated agents). This module turns those logs into one provider-neutral trace, the
+shape observability platforms use: prompts (one user request each), turns (one agent-loop iteration: a model
 call with its exact token usage, then the tools, sub-agents and skills it requested), hooks, context
 events and compactions, each a timed span in one tree.
 
@@ -34,9 +35,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
+from mic_sessions.shared import antigravity
 from mic_sessions.shared.env import get_settings
 
-TraceFormat = Literal["claude", "codex", "gemini"]
+# `antigravity`: Mooi's frame record of an Antigravity CLI session (`<home>/.mooi/stream.jsonl`).
+TraceFormat = Literal["claude", "codex", "antigravity"]
 
 KIND_PROMPT = "prompt"
 KIND_TURN = "turn"
@@ -92,7 +95,7 @@ _CODEX_CONTEXT_PREFIXES = ("<environment_context>", "<user_instructions>", "<per
 @dataclass(frozen=True)
 class TraceSource:
     """Where a runtime's native log lives: a Claude Code `projects` directory, one Codex rollout file or
-    one Gemini CLI session file."""
+    the Antigravity frame record in the session's private home."""
 
     format: TraceFormat
     path: Path
@@ -410,7 +413,7 @@ class _ClaudeParser(_Parser):
         if not tool_id or self.reader.has(tool_id):
             return
         name = str(block.get("name") or "Tool")
-        payload = block.get("input") if isinstance(block.get("input"), dict) else {}
+        payload = _mapping(block.get("input"))
         kind = KIND_AGENT if name in _AGENT_TOOLS else KIND_SKILL if name in _SKILL_TOOLS else KIND_TOOL
         title = _claude_tool_title(name, payload)
         label = (str(payload.get("subagent_type") or "Sub-agent") if kind == KIND_AGENT
@@ -810,156 +813,542 @@ class _CodexParser(_Parser):
         span.close(at)
 
 
-class _GeminiParser(_Parser):
-    """Gemini CLI session logs: a metadata line, then one record per message (`user`, `gemini`, `info`,
-    `warning`, `error`). A message is appended again, under the same id, whenever it changes (its tokens
-    or tool results arrive later), so every span is keyed by the message and updated in place. A
-    `gemini` message is one model call: its text, thoughts, token usage and the tool calls it requested
-    with their results. A reply without tool calls ends the prompt."""
+@dataclass
+class _AgyCall:
+    """One model call of an Antigravity conversation (an `agent_response` step): its spans, the text the
+    stream delivered and the tool spans it requested, so the brain transcript can enrich them later."""
 
-    def __init__(self, reader: TraceReader, path: Path, key: str, agent: str | None = None) -> None:
+    turn: Span
+    llm: Span
+    text: list[str] = field(default_factory=list)
+    tools: list[Span] = field(default_factory=list)
+
+
+@dataclass
+class _AgyState:
+    """What the Antigravity parsers of one conversation share: Mooi's frame record and the brain
+    transcripts are separate files, read in either order, so each side leaves what the other joins."""
+
+    model: str | None = None
+    conversations: dict[str, None] = field(default_factory=dict)
+    # Delegated agents: conversation id -> `log_uri` the stream named (None when only an id is known).
+    subs: dict[str, str | None] = field(default_factory=dict)
+    # Brain transcript records by (conversation, step): model responses, for thinking and full tool arguments.
+    records: dict[tuple[str, int], dict[str, Any]] = field(default_factory=dict)
+    calls: dict[tuple[str, int], _AgyCall] = field(default_factory=dict)
+    step_prompt: dict[tuple[str, int], str] = field(default_factory=dict)
+    compactions: list[str] = field(default_factory=list)
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _agy_id(kind: str, conversation: str, step: Any) -> str:
+    return f"agy:{kind}:{conversation[:8]}:{step}"
+
+
+def _agy_title(name: str, args: Any) -> str | None:
+    if not isinstance(args, dict):
+        return _line(str(args), _TITLE_CHARS) if args else None
+    for key in ("toolSummary", "CommandLine", "Command", "Path", "AbsolutePath", "TargetFile", "Url", "URL",
+                "Query", "Pattern", "SearchPath", "Role", "Prompt", "TypeName"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            return _line(value, _TITLE_CHARS)
+    return _line(_render(args), _TITLE_CHARS) if args else None
+
+
+def _agy_usage(usage: dict[str, Any]) -> dict[str, int]:
+    """agy's per-call token counts: `input_tokens` is the whole prompt (its `total_tokens` is input plus
+    output) and `thinking_tokens` is part of `output_tokens`."""
+    prompt = _int(usage.get("input_tokens"))
+    cached = _int(usage.get("cache_read_tokens"))
+    return {"input": max(0, prompt - cached), "cacheRead": cached, "cacheWrite": 0,
+            "output": _int(usage.get("output_tokens")), "reasoning": _int(usage.get("thinking_tokens")),
+            "context": prompt}
+
+
+def _agy_exit_code(text: str) -> int | None:
+    match = re.search(r"exited with code (-?\d+)", text[:4000])
+    return int(match.group(1)) if match else None
+
+
+def _agy_refresh(reader: TraceReader, conversation: str, step: int) -> None:
+    """Joins a model call with its transcript record: thinking text, the answer and the full arguments
+    of the tools it requested. Idempotent; runs whenever either side learns something new."""
+    state = reader.agy
+    info = state.calls.get((conversation, step))
+    record = state.records.get((conversation, step))
+    if info is None:
+        return
+    llm = info.llm
+    requested = [call for call in (record or {}).get("tool_calls") or [] if isinstance(call, dict)]
+    taken: set[int] = set()
+    for span in info.tools:
+        if not requested:
+            break
+        name = span.metadata.get("toolName")
+        index = next((i for i, call in enumerate(requested) if i not in taken and call.get("name") == name), None)
+        if index is None:
+            index = next((i for i in range(len(requested)) if i not in taken), None)
+        if index is None:
+            continue
+        taken.add(index)
+        args = requested[index].get("args")
+        if args:
+            span.input = reader.clip(_render(args))
+            span.title = _agy_title(span.name, args) or span.title
+            span.preview = span.preview or span.title
+    parts: list[str] = []
+    thinking = (record or {}).get("thinking")
+    if isinstance(thinking, str) and thinking.strip():
+        parts.append(f"[thinking]\n{thinking.strip()}")
+        llm.metadata["reasoning"] = True
+    text = "".join(info.text) or str((record or {}).get("content") or "")
+    if text.strip():
+        parts.append(text)
+        llm.preview = _line(text) or llm.preview
+    parts.extend(f"[tool call] {tool.metadata.get('toolName') or tool.name}" for tool in info.tools)
+    llm.output = reader.clip("\n\n".join(parts))
+    names = llm.metadata.get("tools") or []
+    info.turn.title = info.turn.preview = (_line(", ".join(names), _TITLE_CHARS) if names
+                                           else _line(text, _TITLE_CHARS) or info.turn.title)
+
+
+class _AntigravityParser(_Parser):
+    """Mooi's own record of an Antigravity CLI session (`<home>/.mooi/stream.jsonl`): every frame `agy` printed
+    (`init`, `step_update`, `result`) plus Mooi's `mooi.user`, `mooi.process` and `mooi.compact` notes, each
+    stamped with `mooiAt`. A prompt is a `mooi.user` up to its `result`; a turn is one `agent_response` step
+    (a model call with its usage) and the tool, sub-agent and question steps that follow it."""
+
+    def __init__(self, reader: TraceReader, path: Path, key: str) -> None:
         super().__init__(reader, path, key)
-        self.agent = agent
-        self.root: str | None = f"agent:{agent}" if agent else None
         self.prompt: str | None = None
+        self.prompts = 0
         self.ready_at: float | None = None
-        self.calls: dict[str, Span] = {}
+        self.effort: str | None = None
+        self.last_call: dict[str, int] = {}
+        self.open: dict[str, Span] = {}
+        self.compaction: Span | None = None
 
     def feed(self, entry: dict[str, Any]) -> None:
-        kind = entry.get("type")
-        if kind is None:
-            if isinstance(entry.get("sessionId"), str) and not self.agent and "$set" not in entry:
-                self.reader.metadata.update({"provider": "gemini", "sessionKind": entry.get("kind") or "main"})
+        event = entry.get("event")
+        at = _timestamp(entry.get("mooiAt"))
+        if at is None or not isinstance(event, str):
             return
-        at = _timestamp(entry.get("timestamp"))
-        message_id = str(entry.get("id") or "")
-        if at is None or not message_id:
-            return
-        if kind == "user":
-            self._user(entry, message_id, at)
-        elif kind == "gemini":
-            self._model(entry, message_id, at)
-        elif kind in ("info", "warning", "error"):
-            text = _gemini_text(entry.get("content"))
-            span = self.reader.add(Span(id=f"{self.key}:evt:{message_id}", kind=KIND_EVENT, name=str(kind).capitalize(),
-                                        start=at, parent=self.prompt or self.root, output=self.reader.clip(text),
-                                        preview=_line(text)))
-            span.close(at, STATUS_ERROR if kind == "error" else STATUS_OK)
+        state = self.reader.agy
+        conversation = entry.get("conversation_id")
+        if isinstance(conversation, str) and conversation:
+            state.conversations.setdefault(conversation)
+        if event == "init":
+            init = _mapping(entry.get("init"))
+            state.model = init.get("model") or state.model
+            self.reader.metadata.update({"provider": "antigravity", **(
+                {"permissionMode": init["permission_mode"]} if init.get("permission_mode") else {})})
+        elif event == "mooi.process":
+            if entry.get("phase") == "started":
+                state.model = entry.get("model") or state.model
+                self.effort = entry.get("effort") or self.effort
+            else:
+                self._exited(entry, at)
+        elif event == "mooi.user":
+            self._start_prompt(str(entry.get("text") or ""), at)
+        elif event == "mooi.compact":
+            self._compact(entry, at)
+        elif event == "step_update" and isinstance(entry.get("step_update"), dict):
+            self._step(entry["step_update"], at)
+        elif event == "result" and isinstance(entry.get("result"), dict):
+            self._result(entry["result"], at)
 
-    def _user(self, entry: dict[str, Any], message_id: str, at: float) -> None:
-        text = _gemini_text(entry.get("displayContent") or entry.get("content"))
-        if self.root:
-            # A sub-agent's task is the prompt it was given: its turns sit directly under the sub-agent.
-            self.prompt = self.prompt or self.root
-            self.ready_at = self.ready_at or at
-            return
-        span_id = f"{self.key}:prompt:{message_id}"
-        if not self.reader.has(span_id):
-            self._end_prompt(at)
-            self.loop = 0
-            self.reader.add(Span(id=span_id, kind=KIND_PROMPT, name=f"Prompt {self.reader.next_prompt()}", start=at,
-                                 title=_line(text, _TITLE_CHARS), preview=_line(text), input=self.reader.clip(text)))
-            self.ready_at = at
-        self.prompt = span_id
+    # --- prompts ---
 
-    def _end_prompt(self, at: float) -> None:
-        prompt = self.reader.get(self.prompt or "")
-        if prompt is not None and prompt.end is None and prompt.kind == KIND_PROMPT:
-            prompt.close(at)
-
-    def _model(self, entry: dict[str, Any], message_id: str, at: float) -> None:
-        call = self.calls.get(message_id)
-        if call is None:
-            if self.prompt is None:
-                self._user({}, f"implicit-{message_id}", at)
-            started = min(self.ready_at if self.ready_at is not None else at, at)
-            turn = self._open_turn(f"{self.key}:turn:{message_id}", started, self.prompt)
-            model = entry.get("model") if isinstance(entry.get("model"), str) else None
-            call = self.reader.add(Span(id=f"{self.key}:llm:{message_id}", kind=KIND_LLM, name=model or "Model call",
-                                        start=started, parent=turn.id, model=model))
-            self.calls[message_id] = call
-            if len(self.calls) > 512:
-                self.calls.pop(next(iter(self.calls)))
-        tokens = entry.get("tokens") if isinstance(entry.get("tokens"), dict) else None
-        if tokens:
-            cached = _int(tokens.get("cached"))
-            prompt_tokens = _int(tokens.get("input"))
-            call.usage = {"input": max(0, prompt_tokens - cached), "cacheRead": cached, "cacheWrite": 0,
-                          "output": _int(tokens.get("output")), "reasoning": _int(tokens.get("thoughts")),
-                          "context": prompt_tokens}
-        thoughts = [f"[thought] {thought.get('subject') or ''}\n{thought.get('description') or ''}".strip()
-                    for thought in entry.get("thoughts") or [] if isinstance(thought, dict)]
-        text = _gemini_text(entry.get("content"))
-        tools = [tool for tool in entry.get("toolCalls") or [] if isinstance(tool, dict)]
-        for tool in tools:
-            self._tool(tool, call, at)
-        call.output = self.reader.clip("\n\n".join(part for part in [*thoughts, text, *(
-            f"[tool call] {tool.get('name')}" for tool in tools)] if part))
-        call.preview = _line(text) or call.preview
-        if thoughts:
-            call.metadata["reasoning"] = True
-        call.close(at)
-        self._describe_turn(call)
+    def _start_prompt(self, text: str, at: float) -> None:
+        self._end_prompt(at, STATUS_INTERRUPTED)
+        self.loop = 0
+        span = self.reader.add(Span(id=f"{self.key}:prompt:{at}", kind=KIND_PROMPT, start=at,
+                                    name=f"Prompt {self.reader.next_prompt()}", title=_line(text, _TITLE_CHARS),
+                                    preview=_line(text), input=self.reader.clip(text)))
+        self.prompt = span.id
         self.ready_at = at
-        if not tools and text:
-            self._end_prompt(at)
 
-    def _tool(self, tool: dict[str, Any], call: Span, at: float) -> None:
-        call_id = str(tool.get("id") or f"{call.id}:{tool.get('name')}")
-        name = str(tool.get("name") or "tool")
-        args = tool.get("args") if isinstance(tool.get("args"), dict) else {}
-        title = _claude_tool_title(name, args) or _line(str(tool.get("description") or ""), _TITLE_CHARS)
-        started = _timestamp(tool.get("timestamp")) or at
-        span = self.reader.add(Span(id=f"{self.key}:tool:{call_id}", kind=KIND_AGENT if name == "invoke_agent" else KIND_TOOL,
-                                    name=name, title=title, start=started, parent=call.parent,
-                                    input=self.reader.clip(_render(args)), preview=title))
-        span.metadata = {"call": call.id, "callId": call_id}
-        if span.name not in call.metadata.setdefault("tools", []):
-            call.metadata["tools"].append(span.name)
-        status = tool.get("status")
-        if status in ("success", "error", "cancelled"):
-            display = tool.get("resultDisplay")
-            output = display if isinstance(display, str) and display else _gemini_result(tool.get("result"))
-            span.output = self.reader.clip(output)
-            span.preview = _line(output) or span.preview
-            span.close(at, STATUS_OK if status == "success" else STATUS_INTERRUPTED if status == "cancelled"
-                       else STATUS_ERROR)
+    def _ensure_prompt(self, at: float) -> str:
+        """Work with no `mooi.user` before it (a background task waking the agent) gets its own prompt."""
+        if self.prompt is None or self.reader.get(self.prompt) is None:
+            self._start_prompt("", at)
+        return self.prompt or ""
+
+    def _end_prompt(self, at: float, status: str) -> None:
+        self._close_open(at, status)
+        prompt = self.reader.get(self.prompt or "")
+        if prompt is not None and prompt.end is None:
+            prompt.close(at, status)
+        self.prompt = None
+
+    def _close_open(self, at: float, status: str) -> None:
+        for span in self.open.values():
+            if span.end is None:
+                span.close(at, status)
+        self.open.clear()
+
+    def _event(self, name: str, text: str, at: float, status: str) -> None:
+        span = self.reader.add(Span(id=f"{self.key}:evt:{at}:{name}", kind=KIND_EVENT, name=name, start=at,
+                                    parent=self.prompt, output=self.reader.clip(text), preview=_line(text)))
+        span.close(at, status)
+
+    def _exited(self, entry: dict[str, Any], at: float) -> None:
+        expected = bool(entry.get("expected"))
+        code = entry.get("returncode")
+        if self.prompt is not None:
+            if not expected:
+                self._event("Process exited", f"The Antigravity process ended unexpectedly (exit code {code}).",
+                            at, STATUS_ERROR)
+            self._end_prompt(at, STATUS_INTERRUPTED if expected else STATUS_ERROR)
+        elif not expected:
+            self._event("Process exited", f"The Antigravity process ended unexpectedly (exit code {code}).",
+                        at, STATUS_ERROR)
+
+    # --- steps ---
+
+    def _step(self, step: dict[str, Any], at: float) -> None:
+        conversation = str(step.get("conversation_id") or "")
+        index = step.get("step_index")
+        kind = step.get("step_type")
+        if not isinstance(index, int):
+            return
+        self.reader.agy.conversations.setdefault(conversation)
+        if kind == "user_input":
+            if self.prompt:
+                self.reader.agy.step_prompt[(conversation, index)] = self.prompt
+        elif kind == "system_message":
+            span = self.reader.add(Span(id=_agy_id("ctx", conversation, index), kind=KIND_CONTEXT,
+                                        name="System message", start=at, parent=self._ensure_prompt(at)))
+            span.close(at)
+        elif kind == "agent_response":
+            self._response(conversation, index, step, at)
+        elif kind == "tool":
+            self._tool(conversation, index, step, at)
+        elif kind == "subagent":
+            self._subagent(conversation, index, step, at)
+        elif kind == "checkpoint" and step.get("state") == "DONE":
+            span = self.reader.add(Span(id=_agy_id("compact", conversation, index), kind=KIND_COMPACTION,
+                                        name="Compaction", start=at, parent=self._ensure_prompt(at),
+                                        preview="The conversation history was compacted"))
+            span.close(at)
+            self.ready_at = at
+        elif kind == "unknown":
+            self._question(conversation, index, step, at)
+
+    def _call(self, conversation: str, index: int, at: float) -> tuple[_AgyCall, Span]:
+        state = self.reader.agy
+        info = state.calls.get((conversation, index))
+        if info is None:
+            prompt = self._ensure_prompt(at)
+            started = min(self.ready_at if self.ready_at is not None else at, at)
+            turn = self._open_turn(_agy_id("turn", conversation, index), started, prompt)
+            llm = self.reader.add(Span(id=_agy_id("llm", conversation, index), kind=KIND_LLM, start=started,
+                                       name=state.model or "Model call", parent=turn.id, model=state.model))
+            if self.effort:
+                llm.metadata["effort"] = self.effort
+            info = state.calls[(conversation, index)] = _AgyCall(turn, llm)
+            self.open[llm.id] = llm
+        self.last_call[conversation] = index
+        return info, info.llm
+
+    def _response(self, conversation: str, index: int, step: dict[str, Any], at: float) -> None:
+        info, llm = self._call(conversation, index, at)
+        if isinstance(step.get("text_delta"), str):
+            info.text.append(step["text_delta"])
+        if step.get("state") == "DONE":
+            usage = step.get("usage") if isinstance(step.get("usage"), dict) else None
+            if usage:
+                llm.usage = _agy_usage(usage)
+            duration = step.get("duration_seconds")
+            if isinstance(duration, (int, float)):
+                llm.metadata["durationSeconds"] = round(float(duration), 3)
+                llm.start = min(max(llm.start, at - float(duration)), at)
+            llm.close(at)
+            self.open.pop(llm.id, None)
+            self.ready_at = at
+        _agy_refresh(self.reader, conversation, index)
+
+    def _tool(self, conversation: str, index: int, step: dict[str, Any], at: float) -> None:
+        state = self.reader.agy
+        info = _mapping(step.get("tool_info"))
+        name = str(step.get("tool_name") or info.get("name") or "tool")
+        span_id = _agy_id("tool", conversation, index)
+        span = self.reader.get(span_id)
+        if span is None:
+            last = self.last_call.get(conversation)
+            call = state.calls.get((conversation, last)) if last is not None else None
+            llm = call.llm if call else None
+            parent = call.turn.id if call else self._ensure_prompt(at)
+            arguments = info.get("parameters")
+            title = _agy_title(name, arguments)
+            span = self.reader.add(Span(id=span_id, kind=KIND_TOOL, name=name, title=title, start=at, parent=parent,
+                                        input=self.reader.clip(_render(arguments)), preview=title))
+            span.metadata = {"call": llm.id if llm else None, "callId": f"{conversation}:{index}",
+                             "toolName": name, "stepIndex": index}
+            if call is not None and llm is not None:
+                call.tools.append(span)
+                if name not in llm.metadata.setdefault("tools", []):
+                    llm.metadata["tools"].append(name)
+            self.open[span.id] = span
+        status = step.get("state")
+        if isinstance(step.get("duration_seconds"), (int, float)):
+            span.metadata["durationSeconds"] = round(float(step["duration_seconds"]), 3)
+        if status in ("DONE", "ERROR"):
+            failure = info.get("error")
+            output = info.get("output")
+            if isinstance(failure, dict):
+                text = f"{failure.get('type') or 'ERROR'}: {failure.get('message') or ''}".strip()
+            else:
+                text = _render(failure if failure is not None else output)
+            span.output = self.reader.clip(text)
+            span.preview = _line(text) or span.preview
+            code = _agy_exit_code(text) if name == "run_command" else None
+            if code is not None:
+                span.metadata["exitCode"] = code
+            span.close(at, STATUS_ERROR if status == "ERROR" or code not in (None, 0) else STATUS_OK)
+            self.open.pop(span.id, None)
+            self.ready_at = at
+        last = self.last_call.get(conversation)
+        if last is not None:
+            _agy_refresh(self.reader, conversation, last)
+
+    def _subagent(self, conversation: str, index: int, step: dict[str, Any], at: float) -> None:
+        """One sub-agent span per delegated agent; its own steps come from its brain transcript. The step
+        ends at once (agents run asynchronously), so the span stays open until the agent reports."""
+        state = self.reader.agy
+        info = _mapping(step.get("subagent_info"))
+        last = self.last_call.get(conversation)
+        call = state.calls.get((conversation, last)) if last is not None else None
+        llm = call.llm if call else None
+        for number, agent in enumerate(a for a in info.get("subagents") or [] if isinstance(a, dict)):
+            span_id = f"{self.key}:agent:{conversation[:8]}:{index}:{number}"
+            if self.reader.has(span_id):
+                continue
+            sub = str(agent.get("conversation_id") or "")
+            role = str(agent.get("role") or "") or None
+            kind_name = str(agent.get("type_name") or "") or None
+            span = self.reader.add(Span(id=span_id, kind=KIND_AGENT, name=role or kind_name or "Sub-agent",
+                                        title=role or kind_name, start=at,
+                                        parent=call.turn.id if call else self._ensure_prompt(at),
+                                        input=self.reader.clip(str(agent.get("initial_prompt") or "")),
+                                        preview=_line(str(agent.get("initial_prompt") or ""))))
+            span.metadata = {"call": llm.id if llm else None, "toolName": "invoke_subagent", "agentId": sub or None,
+                             "agentType": kind_name, "role": role}
+            if call is not None and llm is not None:
+                call.tools.append(span)
+                if "invoke_subagent" not in llm.metadata.setdefault("tools", []):
+                    llm.metadata["tools"].append("invoke_subagent")
+            if sub:
+                self.reader.agent_tools[sub] = span.id
+                self.reader.agent_meta[sub] = {"agentType": role or kind_name or "Sub-agent"}
+                state.subs.setdefault(sub, agent.get("log_uri") if isinstance(agent.get("log_uri"), str) else None)
+        self.ready_at = at
+        if last is not None:
+            _agy_refresh(self.reader, conversation, last)
+
+    def _question(self, conversation: str, index: int, step: dict[str, Any], at: float) -> None:
+        """The `ask_question` step: it lasts while the player has not answered."""
+        span = self.reader.add(Span(id=_agy_id("ask", conversation, index), kind=KIND_HOOK, name="Question",
+                                    start=at, parent=self._ensure_prompt(at),
+                                    preview="The agent asked the user a question"))
+        if step.get("state") in ("DONE", "ERROR"):
+            span.close(at, STATUS_ERROR if step.get("state") == "ERROR" else STATUS_OK)
+            self.open.pop(span.id, None)
+            self.ready_at = at
+        else:
+            self.open[span.id] = span
+
+    # --- results and compactions ---
+
+    def _result(self, result: dict[str, Any], at: float) -> None:
+        prompt = self.reader.get(self.prompt or "")
+        reason = str(result.get("finished_reason") or "")
+        interrupted = result.get("error") == "interrupted" or reason == "interrupted"
+        failed = result.get("status") != "SUCCESS"
+        if prompt is not None:
+            prompt.metadata.update({key: result[key] for key in ("num_turns", "duration_seconds", "usage")
+                                    if result.get(key) is not None})
+            if result.get("response"):
+                prompt.output = self.reader.clip(str(result["response"]))
+        for denied in result.get("denied_actions") or []:
+            if not isinstance(denied, dict):
+                continue
+            label = str(denied.get("display_name") or denied.get("action") or "action")
+            span = self.reader.add(Span(id=f"{self.key}:denied:{at}:{label}", kind=KIND_HOOK, start=at,
+                                        name=f"Permission denied: {label}", parent=self.prompt,
+                                        output=self.reader.clip(_render(denied)),
+                                        preview=f"{label} needs a permission the session did not grant"))
+            span.close(at, STATUS_ERROR)
+        if failed and not interrupted:
+            message = str(result.get("error") or f"Antigravity ended the turn with status {result.get('status')}")
+            self._event("Error", f"{message} ({reason})" if reason else message, at, STATUS_ERROR)
+        self._end_prompt(at, STATUS_INTERRUPTED if interrupted else STATUS_ERROR if failed else STATUS_OK)
+
+    def _compact(self, entry: dict[str, Any], at: float) -> None:
+        if entry.get("phase") == "started":
+            self._end_prompt(at, STATUS_INTERRUPTED)
+            self.compaction = self.reader.add(Span(id=f"{self.key}:compact:{at}", kind=KIND_COMPACTION,
+                                                   name="Compaction", start=at,
+                                                   preview="The conversation history was compacted"))
+            self.reader.agy.compactions.append(self.compaction.id)
+            return
+        span, self.compaction = self.compaction, None
+        result = _mapping(entry.get("result"))
+        if span is None:
+            span = self.reader.add(Span(id=f"{self.key}:compact:{at}", kind=KIND_COMPACTION, name="Compaction",
+                                        start=at, preview="The conversation history was compacted"))
+            self.reader.agy.compactions.append(span.id)
+        span.metadata.update({key: result[key] for key in ("num_turns", "duration_seconds", "usage")
+                              if result.get(key) is not None})
+        span.close(at, STATUS_OK if result.get("status") in (None, "SUCCESS") else STATUS_ERROR)
+        self.ready_at = at
 
 
-def _gemini_text(content: Any) -> str:
-    """Text of a Gemini message: a string, or `Part`s whose inline data and file parts become markers."""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, dict):
-        content = [content]
-    if not isinstance(content, list):
-        return _render(content)
-    parts: list[str] = []
-    for part in content:
-        if isinstance(part, str):
-            parts.append(part)
-        elif isinstance(part, dict):
-            if isinstance(part.get("text"), str):
-                parts.append(part["text"])
-            elif "inlineData" in part:
-                parts.append("[image]" if str((part["inlineData"] or {}).get("mimeType", "")).startswith("image/")
-                             else "[file]")
-            elif "fileData" in part:
-                parts.append("[file]")
-    return "\n".join(item for item in parts if item)
+class _AntigravityTranscript(_Parser):
+    """A brain transcript (`brain/<id>/.system_generated/logs/transcript_full.jsonl`): one record per completed
+    step. For the main conversation it only enriches what Mooi's frame record built (thinking, full tool
+    arguments, injected context, compaction summaries); for a delegated agent, whose steps never reach the
+    parent's stream, it builds the whole nested trace."""
+
+    def __init__(self, reader: TraceReader, path: Path, key: str, conversation: str, agent: str | None) -> None:
+        super().__init__(reader, path, key)
+        self.conversation = conversation
+        self.agent = agent
+        self.root: str | None = f"agent:{agent}" if agent else None
+        self.ready_at: float | None = None
+        self.pending: list[Span] = []
+
+    def feed(self, entry: dict[str, Any]) -> None:
+        step = entry.get("step_index")
+        kind = entry.get("type")
+        if not isinstance(step, int):
+            return
+        at = _timestamp(entry.get("created_at"))
+        if self.agent is None:
+            self._main(step, kind, entry, at)
+        elif at is not None:
+            self._delegated(step, kind, entry, at)
+
+    # --- the main conversation ---
+
+    def _main(self, step: int, kind: Any, entry: dict[str, Any], at: float | None) -> None:
+        state = self.reader.agy
+        content = str(entry.get("content") or "")
+        if kind == "PLANNER_RESPONSE":
+            state.records[(self.conversation, step)] = entry
+            _agy_refresh(self.reader, self.conversation, step)
+        elif kind == "SYSTEM_MESSAGE":
+            span = self.reader.get(_agy_id("ctx", self.conversation, step))
+            if span is not None:
+                text = _system_message(content)
+                span.output = self.reader.clip(text)
+                span.preview = span.title = _line(text, _TITLE_CHARS)
+        elif kind == "USER_INPUT":
+            prompt = state.step_prompt.get((self.conversation, step))
+            settings = re.search(r"<USER_SETTINGS_CHANGE>\s*(.*?)\s*</USER_SETTINGS_CHANGE>", content, re.DOTALL)
+            if prompt and settings and at is not None:
+                span = self.reader.add(Span(id=_agy_id("settings", self.conversation, step), kind=KIND_CONTEXT,
+                                            name="Settings change", start=at, parent=prompt,
+                                            output=self.reader.clip(settings.group(1)),
+                                            preview=_line(settings.group(1))))
+                span.close(at)
+        elif kind == "CHECKPOINT":
+            self._checkpoint(step, entry, at)
+
+    def _checkpoint(self, step: int, entry: dict[str, Any], at: float | None) -> None:
+        """The summary a compaction left: joined to the compaction Mooi already recorded (the stream's
+        `checkpoint` step, or the `/compact` run whose time window holds it), else a span of its own."""
+        state = self.reader.agy
+        span = self.reader.get(_agy_id("compact", self.conversation, step))
+        if span is None and at is not None:
+            span = next((found for found in (self.reader.get(item) for item in state.compactions)
+                         if found is not None and found.start - 2 <= at <= (found.end if found.end is not None else at) + 2),
+                        None)
+        if span is None and at is not None:
+            span = self.reader.add(Span(id=_agy_id("compact", self.conversation, step), kind=KIND_COMPACTION,
+                                        name="Compaction", start=at, preview="The conversation history was compacted"))
+            span.close(at)
+        if span is None:
+            return
+        span.output = self.reader.clip(str(entry.get("content") or ""))
+        span.metadata.update({key: entry[key] for key in ("input_tokens", "output_tokens") if entry.get(key) is not None})
+
+    # --- a delegated agent ---
+
+    def _delegated(self, step: int, kind: Any, entry: dict[str, Any], at: float) -> None:
+        content = str(entry.get("content") or "")
+        if kind == "PLANNER_RESPONSE":
+            self._model(step, entry, at)
+        elif kind == "GENERIC":
+            if self.pending:
+                span = self.pending.pop(0)
+                span.output = self.reader.clip(content)
+                span.preview = _line(content) or span.preview
+                code = _agy_exit_code(content)
+                if code is not None:
+                    span.metadata["exitCode"] = code
+                span.close(at, STATUS_ERROR if code not in (None, 0) else STATUS_OK)
+            self.ready_at = at
+        elif kind == "SYSTEM_MESSAGE" and step > 0:
+            text = _system_message(content)
+            span = self.reader.add(Span(id=f"{self.key}:ctx:{step}", kind=KIND_CONTEXT, name="System message",
+                                        start=at, parent=self.root, output=self.reader.clip(text),
+                                        preview=_line(text)))
+            span.close(at)
+        elif kind == "CHECKPOINT":
+            span = self.reader.add(Span(id=f"{self.key}:compact:{step}", kind=KIND_COMPACTION, name="Compaction",
+                                        start=at, parent=self.root, output=self.reader.clip(content),
+                                        preview="The conversation history was compacted"))
+            span.close(at)
+            self.ready_at = at
+
+    def _model(self, step: int, entry: dict[str, Any], at: float) -> None:
+        state = self.reader.agy
+        started = min(self.ready_at if self.ready_at is not None else at, at)
+        turn = self._open_turn(f"{self.key}:turn:{step}", started, self.root)
+        llm = self.reader.add(Span(id=f"{self.key}:llm:{step}", kind=KIND_LLM, name=state.model or "Model call",
+                                   start=started, parent=turn.id, model=state.model,
+                                   usage=_agy_usage(entry)))
+        calls = [call for call in entry.get("tool_calls") or [] if isinstance(call, dict)]
+        text = str(entry.get("content") or "")
+        parts: list[str] = []
+        if isinstance(entry.get("thinking"), str) and entry["thinking"].strip():
+            parts.append(f"[thinking]\n{entry['thinking'].strip()}")
+            llm.metadata["reasoning"] = True
+        if text:
+            parts.append(text)
+            llm.preview = _line(text)
+        for number, call in enumerate(calls):
+            name = str(call.get("name") or "tool")
+            args = call.get("args")
+            title = _agy_title(name, args)
+            span = self.reader.add(Span(id=f"{self.key}:tool:{step}:{number}",
+                                        kind=KIND_AGENT if name == "invoke_subagent" else KIND_TOOL, name=name,
+                                        title=title, start=at, parent=turn.id, input=self.reader.clip(_render(args)),
+                                        preview=title))
+            span.metadata = {"call": llm.id, "toolName": name}
+            llm.metadata.setdefault("tools", []).append(name)
+            parts.append(f"[tool call] {name}")
+            self.pending.append(span)
+        llm.output = self.reader.clip("\n\n".join(parts))
+        llm.close(at)
+        self._describe_turn(llm)
+        self.ready_at = at
+        if not calls:
+            # A response with no tool calls is the agent's report: it is done.
+            agent = self.reader.get(self.reader.agent_tools.get(self.agent or "", ""))
+            if agent is not None and agent.end is None:
+                agent.output = self.reader.clip(text)
+                agent.close(at)
 
 
-def _gemini_result(result: Any) -> str:
-    """A tool call's recorded result: the `functionResponse` parts sent back to the model."""
-    texts = []
-    for part in result if isinstance(result, list) else [result]:
-        response = part.get("functionResponse") if isinstance(part, dict) else None
-        if isinstance(response, dict):
-            body = response.get("response")
-            texts.append(_render(body.get("output") if isinstance(body, dict) and "output" in body else body))
-        elif part is not None:
-            texts.append(_gemini_text(part))
-    return "\n".join(text for text in texts if text)
+def _system_message(content: str) -> str:
+    match = re.search(r"<SYSTEM_MESSAGE>\s*(.*?)\s*</SYSTEM_MESSAGE>", content, re.DOTALL)
+    return (match.group(1) if match else content).strip()
 
 
 @dataclass
@@ -983,6 +1372,8 @@ class TraceReader:
         self.agent_tools: dict[str, str] = {}
         # Codex threads spawned by this conversation and their rollout, once it exists.
         self.codex_threads: dict[str, Path | None] = {}
+        # What the Antigravity parsers share (its frame record and brain transcripts are separate files).
+        self.agy = _AgyState()
         self.agent_meta: dict[str, dict[str, Any]] = {}
         self.agent_prompts: dict[str, str] = {}
         self.metadata: dict[str, Any] = {}
@@ -1054,17 +1445,25 @@ class TraceReader:
 
     def _discover(self, source: TraceSource) -> Iterable[tuple[Path, Path, Callable[[], _Parser]]]:
         """Each log file under `source` with the root its download name is relative to, and its parser."""
-        if source.format == "gemini":
-            # `<GEMINI_CLI_HOME>/.gemini/tmp/<project>/chats/session-….jsonl`; a sub-agent's log sits in a
-            # folder named after its parent conversation. Names keep the project folder.
-            root = source.path.parents[2]
-            yield source.path, root, lambda: _GeminiParser(self, source.path, "gemini")
-            prefix = source.path.stem.rsplit("-", 1)[-1]
-            for folder in sorted(source.path.parent.glob(f"{prefix}*")):
-                if not folder.is_dir():
-                    continue
-                for path in sorted(folder.glob("*.jsonl")):
-                    yield path, root, lambda path=path: _GeminiParser(self, path, f"a{path.stem[:8]}", path.stem)
+        if source.format == "antigravity":
+            # `<home>/.mooi/stream.jsonl` is the trace; the rest of the agent's raw files (brain transcripts,
+            # conversation databases, logs) sit under `<home>/.gemini/antigravity-cli` and are only offered for
+            # download, except the transcripts of the conversations the frames named (thinking, delegated agents).
+            home = source.path.parents[1]
+            data = antigravity.data_dir(home)
+            yield source.path, source.path.parent, lambda: _AntigravityParser(self, source.path, "agy")
+            for path in antigravity.session_logs(home):
+                self.logs.setdefault(path, TraceLog(data, path))
+            for conversation in list(self.agy.conversations):
+                path = antigravity.transcript(home, conversation)
+                yield path, data, lambda path=path, conversation=conversation: _AntigravityTranscript(
+                    self, path, f"g{conversation[:8]}", conversation, None)
+            for agent, uri in list(self.agy.subs.items()):
+                path = antigravity.transcript(home, agent)
+                if not path.exists() and uri is not None:
+                    path = antigravity.subagent_transcript(home, uri) or path
+                yield path, data, lambda path=path, agent=agent: _AntigravityTranscript(
+                    self, path, f"s{agent[:8]}", agent, agent)
             return
         if source.format == "codex":
             # `<CODEX_HOME>/sessions/YYYY/MM/DD/rollout-….jsonl`: names keep the date folders.

@@ -2,7 +2,7 @@
 export interface AgentProviderCopy {
   /** The sign-in where the provider's page shows a code to paste back. */
   signIn: { action: string; instructions: string; codeHint: string };
-  /** A credential pasted by hand: a setup token or an API key. `hintEnd` carries its own leading space. */
+  /** A credential pasted by hand: a setup token. `hintEnd` carries its own leading space. */
   pasted: { label: string; placeholder: string; hint: string; command?: string; hintEnd?: string };
 }
 
@@ -15,13 +15,13 @@ const COPY: Record<string, AgentProviderCopy> = {
     },
     pasted: { label: 'Claude setup token', placeholder: 'sk-ant-oat01-…', hint: 'Create it with', command: 'claude setup-token', hintEnd: ' on your machine.' },
   },
-  gemini: {
+  antigravity: {
     signIn: {
       action: 'Continue with Google',
-      instructions: 'Sign in with your Google account and allow Gemini CLI. Then copy the authorization code Google shows and paste it here.',
-      codeHint: 'The code works once and expires after a few minutes. Your Gemini Code Assist plan and its limits apply.',
+      instructions: "Sign in with your Google account to link Google's Antigravity CLI. Then copy the code Google shows and paste it here.",
+      codeHint: 'The code works once and expires after a few minutes. Models from Gemini, Claude and GPT-OSS, and their limits, follow your Antigravity plan.',
     },
-    pasted: { label: 'Gemini API key', placeholder: 'AIza…', hint: 'Create one in Google AI Studio, under', command: 'aistudio.google.com/apikey', hintEnd: '. Usage is billed to its project.' },
+    pasted: { label: 'Antigravity token', placeholder: 'Paste the token', hint: 'Antigravity links only with Google sign-in.' },
   },
 };
 
