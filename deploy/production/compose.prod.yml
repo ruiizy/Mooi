@@ -91,6 +91,11 @@ services:
       GITHUB_APP_SLUG: ${GITHUB_APP_SLUG:-}
       GITHUB_REDIRECT_URI: https://${DOMAIN:?}/account/github/callback
       AGENT_CLAUDE_REDIRECT_URI: https://${DOMAIN:?}/account/agents/claude/callback
+      # Gemini CLI sign-in (Google): offered only once both client values are set.
+      AGENT_GEMINI_ENABLED: ${AGENT_GEMINI_ENABLED:-true}
+      AGENT_GEMINI_CLIENT_ID: ${AGENT_GEMINI_CLIENT_ID:-}
+      AGENT_GEMINI_CLIENT_SECRET: ${AGENT_GEMINI_CLIENT_SECRET:-}
+      AGENT_GEMINI_TOKEN_REFRESH_SKEW: ${AGENT_GEMINI_TOKEN_REFRESH_SKEW:-10m}
       LOG_LEVEL_APP: ${LOG_LEVEL_APP:-INFO}
     mem_limit: ${MIC_MOOI_MEMORY:-1g}
     depends_on:
@@ -125,6 +130,7 @@ services:
       PREVIEW_NETWORK: ${MOOI_PREVIEWS_NETWORK:-mooi-previews}
       AGENT_CLAUDE_MODEL: ${AGENT_CLAUDE_MODEL:-sonnet}
       AGENT_CLAUDE_EFFORT: ${AGENT_CLAUDE_EFFORT:-high}
+      AGENT_GEMINI_MODEL: ${AGENT_GEMINI_MODEL:-auto}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
