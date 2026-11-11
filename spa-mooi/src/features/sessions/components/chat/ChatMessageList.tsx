@@ -13,6 +13,7 @@ interface ChatMessageListProps {
   sessionId: string;
   entries: TranscriptEntry[];
   pending: SessionPendingRequest[];
+  provider: string;
   providerLabel: string;
   capabilities: AgentCapabilities;
   working: boolean;
@@ -28,6 +29,7 @@ export const ChatMessageList = ({
   sessionId,
   entries,
   pending,
+  provider,
   providerLabel,
   capabilities,
   working,
@@ -90,7 +92,7 @@ export const ChatMessageList = ({
             <h2 className="mt-6 text-xl font-semibold tracking-[-0.03em] text-ink">{loading ? 'Loading conversation…' : working ? 'Processing your message…' : 'What shall we build?'}</h2>
             <p className="mt-2 max-w-sm text-sm leading-relaxed text-ink-muted">{loading ? 'Restoring the messages in this session.' : 'Describe an idea, ask about your code, or work through a change together.'}</p>
           </li> : <>
-            {visibleEntries.map((entry) => <ChatMessageItem key={entry.id} sessionId={sessionId} entry={entry} providerLabel={providerLabel} capabilities={capabilities}
+            {visibleEntries.map((entry) => <ChatMessageItem key={entry.id} sessionId={sessionId} entry={entry} provider={provider} providerLabel={providerLabel} capabilities={capabilities}
               live={agentBusy && entry.kind === 'assistant' && entry.streaming} />)}
             {agentBusy && !hasStreamingAssistant ? (
               <li className="animate-fade-up sm:pl-11">

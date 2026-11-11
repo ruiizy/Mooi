@@ -1,4 +1,5 @@
 import { Link, useLocation } from 'react-router-dom';
+import { AgentProviderIcon } from '@/features/agents/components/AgentProviderIcon';
 import { sessionChatLabel } from '@/features/sessions/lib/sessionChatLabel';
 import { sessionChatPath } from '@/features/sessions/lib/sessionChatPath';
 import { sessionKindIcon } from '@/features/sessions/lib/sessionKindIcon';
@@ -34,7 +35,9 @@ export const AppRecentSession = ({ session, onNavigate }: AppRecentSessionProps)
           active ? 'bg-surface text-ink shadow-card ring-1 ring-line' : 'text-ink-muted hover:bg-surface/60 hover:text-ink',
         )}
       >
-        <Icon className="size-3.5 shrink-0 text-ink-subtle" aria-hidden />
+        {session.kind === 'session'
+          ? <AgentProviderIcon provider={session.provider} className="size-3.5" />
+          : <Icon className="size-3.5 shrink-0 text-ink-subtle" aria-hidden />}
         <span className="min-w-0 flex-1">
           <span className={cn('block truncate text-xs font-medium', session.kind === 'session' && 'font-mono')}>{label}</span>
           <span className="mt-0.5 flex items-center gap-1.5 text-[11px] font-medium text-ink-subtle">

@@ -100,6 +100,7 @@ export const ChatPanel = ({
       sessionId={session.id}
       entries={entries}
       pending={pending}
+      provider={session.provider}
       providerLabel={session.providerLabel}
       capabilities={session.capabilities}
       working={working || sending}
