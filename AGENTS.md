@@ -49,7 +49,7 @@ from it. Where they differ, this context wins over the current implementation (s
 
 - Many sessions per project, technically independent: each has its own branch and its own repository copy
   (worktree/clone), so features progress in parallel without interfering.
-- Chat UX like Claude Code / Codex. Supported providers: **Claude** and **Codex**.
+- Chat UX like Claude Code / Codex. Supported providers: **Claude**, **Codex** and **Gemini**.
 - Live view of what the agent does and of changed files on the session branch.
 - **Message queue**: messages sent while the agent is busy (a turn, a compaction, a deployment start) wait
   in the chat's queue, kept by the platform and shown live on every device. Each turn's end delivers the
@@ -58,7 +58,8 @@ from it. Where they differ, this context wins over the current implementation (s
   it reconnects. Same in development, production and backup chats.
 - Provider integration through **adapters** behind one provider-agnostic API: a provider may offer
   several (Claude: **Claude SDK**, the default, and **Claude CLI**, which drives the Claude Code CLI
-  natively; Codex: its SDK). Each adapter supports every session feature (streaming, questions,
+  natively; Codex: its SDK; Gemini, which ships no agent SDK: **Gemini ACP**, the default, which drives the
+  Gemini CLI through its Agent Client Protocol, and **Gemini CLI**, its headless stream-json mode). Each adapter supports every session feature (streaming, questions,
   interrupt, compaction, model/effort, context and limit KPIs) in its own way; a session picks one with
   its model and effort and keeps it.
 - A **Files** tab, always visible in a development session: a project view of the session's working tree
@@ -78,9 +79,11 @@ from it. Where they differ, this context wins over the current implementation (s
   same or different accounts.
 - Provider accounts link by each provider's own sign-in: Claude like the Claude Code app (OAuth2 + PKCE,
   the code Anthropic shows pasted back; a `claude setup-token` token only when operators turn sign-in
-  off, and for existing links), Codex by device code. The platform alone
+  off, and for existing links), Codex by device code, Gemini like the Gemini CLI (Google OAuth2 + PKCE,
+  the code Google's Code Assist page shows pasted back) or with a Gemini API key. The platform alone
   renews sign-in tokens, so concurrent sessions of one account never race, and live sessions pick up a
-  renewed token on their next message.
+  renewed token on their next message; Google never rotates a refresh token, so a Gemini session may also
+  renew its access token itself inside a turn longer than the token's hour.
 - **Agentic merge**: merging an outdated branch with conflicts makes the agent resolve them, preserving
   both sides' features.
 

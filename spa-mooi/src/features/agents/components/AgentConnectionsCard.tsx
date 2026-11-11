@@ -47,7 +47,7 @@ export const AgentConnectionsCard = () => {
     {status === 'ready' && connections.length === 0 && <div className="mt-5 rounded-xl border border-dashed border-line px-5 py-8 text-center">
       <span className="mx-auto flex size-10 items-center justify-center rounded-xl bg-surface-2 text-ink-muted"><Bot className="size-5" /></span>
       <p className="mt-3 text-sm font-semibold text-ink">No agent accounts yet</p>
-      <p className="mt-1 text-xs text-ink-muted">Add a Claude or Codex account to start a session.</p>
+      <p className="mt-1 text-xs text-ink-muted">Add a Claude, Codex or Gemini account to start a session.</p>
     </div>}
 
     {connections.length > 0 && <ul className="mt-5 divide-y divide-line rounded-xl border border-line px-4 sm:px-5">

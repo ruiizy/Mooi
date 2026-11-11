@@ -2105,11 +2105,17 @@ async def _run_compaction(
             await _runtime(session).compact(instructions)
         except asyncio.CancelledError:
             raise
-        except Exception:
-            LOG.exception("Session %s could not compact its conversation", session.id)
+        except Exception as error:
+            # A runtime that refuses on purpose (an adapter without manual compaction) says why itself.
+            refused = isinstance(error, ApiException)
+            if refused:
+                LOG.info("Session %s did not compact its conversation: %s", session.id, error.message)
+            else:
+                LOG.exception("Session %s could not compact its conversation", session.id)
             record(session, "session.usage", {"context": previous_context})
             record(session, EVENT_SESSION_COMPACTION, {"phase": "failed"})
-            record(session, "error", {"message": "The agent could not compact the conversation. Try again."})
+            record(session, "error", {"message": error.message if refused
+                                      else "The agent could not compact the conversation. Try again."})
             if session.status == STATUS_COMPACTING:
                 _record_status(session, STATUS_READY)
         else:
