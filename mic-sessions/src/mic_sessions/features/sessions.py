@@ -893,18 +893,24 @@ class SessionRegistry:
         self._sessions: dict[UUID, Session] = {}
         self._lock = asyncio.Lock()
 
-    def check_limits(self, player_id: UUID) -> None:
-        """Fails fast before the expensive clone/workspace/runtime work — best effort only:
-        `add` is what actually enforces the limits atomically once the session is ready."""
+    def _check_limits(self, session: Session) -> None:
+        """The pod limit counts every live chat (each one holds a runtime). The per-player limit counts
+        only development sessions, the ones the player sees and closes in their session lists:
+        production and backup chats are already bounded to one per project and kind, and counting
+        them made the limit trip while the player's lists showed free room."""
         settings = get_settings()
         if len(self._sessions) >= settings.max_sessions:
-            raise ApiException.conflict("The pod has reached its session limit")
-        owned = sum(1 for session in self._sessions.values() if session.player_id == player_id)
+            raise ApiException.conflict(
+                f"Mooi is running its maximum of {settings.max_sessions} chats right now. Try again shortly")
+        if session.kind != "session":
+            return
+        owned = sum(1 for existing in self._sessions.values()
+                    if existing.player_id == session.player_id and existing.kind == "session")
         if owned >= settings.max_sessions_per_player:
-            raise ApiException.conflict("You have reached your session limit")
+            raise ApiException.conflict(
+                f"You have {owned} open sessions, the maximum. Close one to start another")
 
     async def add(self, session: Session) -> None:
-        settings = get_settings()
         async with self._lock:
             if session.kind in _PLATFORM_KINDS and any(
                 existing.player_id == session.player_id and existing.project_id == session.project_id
@@ -912,11 +918,7 @@ class SessionRegistry:
                 for existing in self._sessions.values()
             ):
                 raise ApiException.conflict(f"A {session.kind} chat already exists for this project")
-            if len(self._sessions) >= settings.max_sessions:
-                raise ApiException.conflict("The pod has reached its session limit")
-            owned = sum(1 for existing in self._sessions.values() if existing.player_id == session.player_id)
-            if owned >= settings.max_sessions_per_player:
-                raise ApiException.conflict("You have reached your session limit")
+            self._check_limits(session)
             self._sessions[session.id] = session
         _announce(session)
 
