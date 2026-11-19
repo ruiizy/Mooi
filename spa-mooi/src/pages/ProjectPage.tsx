@@ -51,7 +51,7 @@ export const ProjectPage = () => {
   } = useProjects();
   const project = findProject(projects, projectId);
   const { sessions, busy: sessionBusy, actionError, create, clearActionError } = useProjectSessions(project?.id);
-  const { connections } = useAgentConnections();
+  const { connections, reload: reloadConnections } = useAgentConnections();
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [removalOpen, setRemovalOpen] = useState(false);
   const [removalAction, setRemovalAction] = useState<ProjectRemovalAction | null>(null);
@@ -177,6 +177,7 @@ export const ProjectPage = () => {
         connections={connections}
         busy={sessionBusy}
         actionError={actionError}
+        onRefreshConnections={reloadConnections}
         onClose={() => {
           setNewSessionOpen(false);
           clearActionError();

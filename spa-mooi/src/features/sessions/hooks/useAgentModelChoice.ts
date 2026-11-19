@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { AgentConnection } from '@/features/agents/types/AgentConnection';
 import { fetchSessionProvider } from '@/features/sessions/api/sessionsApi';
 import { defaultEffortFor } from '@/features/sessions/lib/defaultEffortFor';
@@ -33,13 +33,18 @@ export interface AgentModelChoice {
  * the same provider and falls back to the provider's default otherwise.
  */
 export const useAgentModelChoice = (open: boolean, connections: AgentConnection[]): AgentModelChoice => {
+  // A stale row is retained on the account page so it can be reconnected in place, but it is not a
+  // usable session choice. In particular, an old default must never win over a newer valid account.
+  const availableConnections = useMemo(
+    () => connections.filter((connection) => !connection.stale), [connections],
+  );
   const [connectionId, setConnectionId] = useState('');
   const [requestedAdapter, setRequestedAdapter] = useState('');
   const [catalog, setCatalog] = useState<{ connectionId: string; adapter: string; provider: SessionProvider } | null>(null);
   const [model, setModel] = useState('');
   const [effort, setEffort] = useState('');
   const [catalogError, setCatalogError] = useState<string | null>(null);
-  const selectedConnection = connections.find((entry) => entry.id === connectionId);
+  const selectedConnection = availableConnections.find((entry) => entry.id === connectionId);
   const provider = selectedConnection?.provider ?? '';
   const selectedProvider = catalog?.connectionId === connectionId && catalog.adapter === requestedAdapter
     && catalog.provider.id === provider ? catalog.provider : undefined;
@@ -80,18 +85,20 @@ export const useAgentModelChoice = (open: boolean, connections: AgentConnection[
       setConnectionId('');
       return;
     }
-    setConnectionId((current) => (current && connections.some((connection) => connection.id === current)
-      ? current : connections.find((connection) => connection.defaultAccount)?.id ?? connections[0]?.id ?? ''));
-  }, [open, connections]);
+    setConnectionId((current) => (current && availableConnections.some((connection) => connection.id === current)
+      ? current : availableConnections.find((connection) => connection.defaultAccount)?.id
+        ?? availableConnections[0]?.id ?? ''));
+  }, [open, availableConnections]);
 
   const selectModel = (value: string) => {
     setModel(value);
     setEffort(defaultEffortFor(selectedProvider, value));
   };
 
-  const ready = connections.length > 0 && provider.length > 0 && connectionId.length > 0
+  const ready = availableConnections.length > 0 && provider.length > 0 && connectionId.length > 0
     && Boolean(selectedProvider?.models.some((entry) => entry.id === model)) && !selectedProvider?.unavailable;
 
-  return { connections, connectionId, setConnectionId, provider, adapters, adapter, setAdapter: setRequestedAdapter,
+  return { connections: availableConnections, connectionId, setConnectionId, provider, adapters,
+    adapter, setAdapter: setRequestedAdapter,
     selectedProvider, model, effort, selectModel, setEffort, catalogError, ready };
 };

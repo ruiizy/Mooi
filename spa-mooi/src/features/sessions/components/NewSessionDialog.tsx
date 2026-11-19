@@ -17,6 +17,7 @@ interface NewSessionDialogProps {
   connections: AgentConnection[];
   busy: boolean;
   actionError: string | null;
+  onRefreshConnections: () => Promise<void>;
   onClose: () => void;
   onCreate: (request: CreateSessionRequest) => Promise<boolean>;
 }
@@ -54,10 +55,12 @@ export const NewSessionDialog = ({
   connections,
   busy,
   actionError,
+  onRefreshConnections,
   onClose,
   onCreate,
 }: NewSessionDialogProps) => {
   const [branch, setBranch] = useState('');
+  const [refreshingConnections, setRefreshingConnections] = useState(false);
   const choice = useAgentModelChoice(open, connections);
   const wasOpenRef = useRef(false);
   const branchEditedRef = useRef(false);
@@ -69,12 +72,16 @@ export const NewSessionDialog = ({
    * must not wipe what the user is typing.
    */
   useEffect(() => {
-    if (open && !wasOpenRef.current) branchEditedRef.current = false;
+    if (open && !wasOpenRef.current) {
+      branchEditedRef.current = false;
+      setRefreshingConnections(true);
+      void onRefreshConnections().finally(() => setRefreshingConnections(false));
+    }
     if (open && !branchEditedRef.current) setBranch(projectName ? proposeBranchName(projectName) : '');
     wasOpenRef.current = open;
-  }, [open, projectName]);
+  }, [open, projectName, onRefreshConnections]);
 
-  const canSubmit = Boolean(project) && choice.ready && branch.trim().length > 0;
+  const canSubmit = !refreshingConnections && Boolean(project) && choice.ready && branch.trim().length > 0;
 
   const handleSubmit = () => {
     if (!project || !canSubmit) {

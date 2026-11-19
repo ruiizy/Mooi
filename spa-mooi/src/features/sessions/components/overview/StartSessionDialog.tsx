@@ -30,7 +30,7 @@ export const StartSessionDialog = ({ open, initialProjectId, backLink, onClose }
   const navigate = useNavigate();
   const { projects } = useProjects();
   const { linked } = useGithubLinked();
-  const { connections } = useAgentConnections();
+  const { connections, reload: reloadConnections } = useAgentConnections();
   const { busy, actionError, create, clearActionError } = useProjectSessions(undefined);
   const [projectId, setProjectId] = useState<string | null>(null);
   const [adding, setAdding] = useState<'import' | 'create' | null>(null);
@@ -68,6 +68,7 @@ export const StartSessionDialog = ({ open, initialProjectId, backLink, onClose }
         connections={connections}
         busy={busy}
         actionError={actionError}
+        onRefreshConnections={reloadConnections}
         onClose={close}
         onCreate={handleCreate}
       />

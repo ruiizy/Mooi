@@ -22,7 +22,7 @@ interface UseAgentConnections {
   disconnect: (id: string) => Promise<boolean>;
   rename: (id: string, name: string) => Promise<boolean>;
   setDefaultAccount: (id: string | null) => Promise<boolean>;
-  reload: () => void;
+  reload: () => Promise<void>;
   clearActionError: () => void;
 }
 
@@ -106,15 +106,13 @@ export const useAgentConnections = (): UseAgentConnections => {
     }
   }, []);
 
-  const reload = useCallback(() => {
+  const reload = useCallback(async (): Promise<void> => {
     useAgentsStore.getState().setStatus('loading');
-    fetchAgentConnections()
-      .then((loaded) => {
-        useAgentsStore.getState().setConnections(loaded);
-      })
-      .catch((failure: Error) => {
-        useAgentsStore.getState().setError(failure.message);
-      });
+    try {
+      useAgentsStore.getState().setConnections(await fetchAgentConnections());
+    } catch (failure) {
+      useAgentsStore.getState().setError((failure as Error).message);
+    }
   }, []);
 
   const clearActionError = useCallback(() => setActionError(null), []);

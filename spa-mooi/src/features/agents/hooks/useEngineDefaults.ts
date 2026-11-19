@@ -52,7 +52,7 @@ export const useEngineDefaults = () => {
     if (!connections || (!refresh && requested.current.has(key))) return;
     requested.current.add(key);
     setCatalogs((current) => ({ ...current, [key]: { catalog: current[key]?.catalog ?? null, error: null, loading: true } }));
-    const accounts = connections.filter((entry) => entry.provider === provider)
+    const accounts = connections.filter((entry) => entry.provider === provider && !entry.stale)
       .sort((a, b) => Number(b.defaultAccount) - Number(a.defaultAccount));
     void (async () => {
       let error = 'Connect an account of this provider to list its models.';
